@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Install Arch dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          binutils curl git quickshell qt6-declarative shellcheck systemd xz
+
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Zig 0.16.0
+        env:
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          ZIG_URL: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        run: |
+          zig_archive=/tmp/zig-x86_64-linux-0.16.0.tar.xz
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$zig_archive" "$ZIG_URL"
+          printf '%s  %s\n' "$ZIG_SHA256" "$zig_archive" \
+            | sha256sum --check --strict -
+          tar -xJf "$zig_archive" -C /opt
+          printf '%s\n' /opt/zig-x86_64-linux-0.16.0 >> "$GITHUB_PATH"
+
+      - name: Run canonical gate
+        run: ./scripts/check.sh

@@ -1,0 +1,15 @@
+# fnx-oem-osd listener — journal observer that drives the OSD via
+# Quickshell IPC. Template; placeholders are substituted by install/install.sh.
+# Inert: nothing enables/starts/reloads this unit.
+[Unit]
+Description=Fn+X OEM mode listener (journal observer -> OSD IPC)
+After=graphical-session.target fnx-oem-osd-osd.service
+
+[Service]
+Type=simple
+ExecStart=:@LISTENER_BIN@ --qs-bin @QS_BIN@ --qml-path @QML_PATH@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
