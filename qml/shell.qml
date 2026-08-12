@@ -488,8 +488,8 @@ PanelWindow {
                         id: touchpadIcon
 
                         anchors.centerIn: parent
-                        width: 19
-                        height: 22
+                        width: 23
+                        height: 17
                         visible: root.currentFeature === "touchpad"
 
                         Rectangle {
@@ -501,9 +501,9 @@ PanelWindow {
                         }
 
                         Rectangle {
-                            x: 3
-                            y: 15
-                            width: 13
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 11
+                            width: parent.width - 4
                             height: 1
                             color: root.accentForegroundColor
                         }
