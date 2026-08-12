@@ -6,6 +6,11 @@ command -v zig >/dev/null 2>&1 || {
     printf 'zig-build.sh: zig not found\n' >&2
     exit 1
 }
+zig_version=$(zig version)
+[ "$zig_version" = 0.16.0 ] || {
+    printf 'zig-build.sh: Zig 0.16.0 is required (found %s)\n' "$zig_version" >&2
+    exit 1
+}
 
 native_config=$(mktemp "${TMPDIR:-/tmp}/fnx-oem-osd-libc.XXXXXX")
 work_dir=

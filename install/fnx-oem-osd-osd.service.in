@@ -1,13 +1,15 @@
+# xingyao-oem-mode-osd managed user unit v1
 # fnx-oem-osd OSD shell — standalone Quickshell config exposing the
 # `fnx-oem-osd` IPC handler. Template; placeholders are substituted by
 # install/install.sh. Inert: nothing enables/starts/reloads this unit.
 [Unit]
 Description=Fn+X OEM mode OSD (Quickshell shell)
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=:@QS_BIN@ -p @QML_PATH@
+ExecStart=:@ENV_BIN@ -- @QS_BIN@ -p @QML_PATH@
 Restart=on-failure
 RestartSec=2
 

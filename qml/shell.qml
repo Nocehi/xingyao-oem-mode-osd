@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 // fnx-oem-osd — standalone Quickshell OSD reached via Quickshell IPC.
 // Run it with:   qs -p <this-directory>
 // Then:          qs -p <this-directory> ipc call fnx-oem-osd showPerformance
@@ -182,7 +184,7 @@ PanelWindow {
     implicitHeight: 90
     visible: false
     color: "transparent"
-    WlrLayershell.layer: WlrLayershell.Overlay
+    WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 

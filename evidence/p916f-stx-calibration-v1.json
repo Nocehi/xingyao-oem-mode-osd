@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "evidence_class": "author-transcribed-calibration-summary",
+  "raw_capture_in_repository": false,
+  "support_identity": {
+    "sys_vendor": "MECHREVO",
+    "board_name": "XINGYAO Series-P916F-STX",
+    "event_guid": "ABBC0F5B-8EA1-11D1-A000-C90629100000",
+    "method_guid": "ABBC0F5C-8EA1-11D1-A000-C90629100000",
+    "input_name": "Huawei WMI hotkeys"
+  },
+  "audit_identity_observation": {
+    "observed_on": "2026-08-12",
+    "product_name": "XINGYAO Series",
+    "bios_version": "1.06",
+    "scope": "Read-only author-host observation made after the calibration date; not a raw calibration capture."
+  },
+  "mappings": [
+    {
+      "scancode": "0x0041",
+      "mode": "balanced"
+    },
+    {
+      "scancode": "0x0042",
+      "mode": "performance"
+    }
+  ],
+  "calibration_samples": [
+    {
+      "local_time": "2026-08-11T21:46:27.386+08:00",
+      "scancode": "0x0041",
+      "mode": "balanced",
+      "stapm_w": 15,
+      "fast_ppt_w": 30,
+      "slow_ppt_w": 25
+    },
+    {
+      "local_time": "2026-08-11T21:48:46.138+08:00",
+      "scancode": "0x0042",
+      "mode": "performance",
+      "stapm_w": 28,
+      "fast_ppt_w": 45,
+      "slow_ppt_w": 35
+    },
+    {
+      "local_time": "2026-08-11T21:56:04.159+08:00",
+      "scancode": "0x0041",
+      "mode": "balanced",
+      "stapm_w": 15,
+      "fast_ppt_w": 30,
+      "slow_ppt_w": 25
+    }
+  ],
+  "controlled_linux_state": {
+    "ac_online": true,
+    "platform_profile": "performance",
+    "energy_performance_preference": "performance",
+    "cpu_governor": "performance"
+  },
+  "limitations": [
+    "Values are transcribed from the original author's local run; raw journal and RyzenAdj captures are not shipped in this repository.",
+    "The summary does not establish compatibility for another model, board identity, BIOS, WMI path, or scancode mapping.",
+    "A successful IPC response does not prove visible compositor presentation."
+  ]
+}

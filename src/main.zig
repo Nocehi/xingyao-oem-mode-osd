@@ -7,19 +7,22 @@
 //!
 //! Design rules (see README.md for the full evidence chain):
 //!   * No evdev listener, key grab, key injection, udev/hwdb remap or
-//!     niri/keyd binding: the upstream huawei-wmi driver consumes the
-//!     scancode and never reports an input event. The only observable is
-//!     the journal.
+//!     niri/keyd binding: on the calibrated host, the huawei-wmi path was
+//!     observed logging the scancode without a usable input event. The
+//!     journal is the deliberately retained event surface.
 //!   * Native libsystemd journal API only; no `journalctl`, no file polling.
 //!   * Startup seeks to the journal tail; only later entries are consumed.
 //!   * Strict admission: kernel transport + kernel identifier + input
-//!     subsystem + dynamic `+input:inputN` device + exact message whose
-//!     `inputN` agrees with that device and whose code is 0x0041 or 0x0042.
-//!     The `N` in `inputN` is never hard-coded.
-//!   * Monotonic debounce against duplicate WMI notifications.
-//!   * Fn+X is an OEM mode namespace. Live A -> B -> A calibration on this
-//!     host binds 0x0041 to balanced and 0x0042 to performance. The listener
-//!     maps each admitted scancode directly; it has no seed or toggle state.
+//!     subsystem + the dynamically resolved `Huawei WMI hotkeys` input device
+//!     + exact message whose `inputN` agrees with that device and whose code is
+//!     0x0041 or 0x0042. The `N` in `inputN` is never hard-coded.
+//!   * Fail-closed hardware preflight for the calibrated P916F-STX DMI, WMI
+//!     GUID pair, huawei-wmi platform path, and input-device identity.
+//!   * Per-mode monotonic debounce against duplicate WMI notifications.
+//!   * Fn+X is an OEM mode namespace. The author-transcribed A -> B -> A
+//!     calibration summary binds 0x0041 to balanced and 0x0042 to performance.
+//!     The listener maps each admitted scancode directly; it has no seed or
+//!     toggle state.
 //!   * Quickshell IPC is invoked without a shell (argv-only) and its exit
 //!     status is checked; a failure is reported, never claimed as shown.
 
@@ -31,10 +34,60 @@ const jl = @cImport({
     @cInclude("unistd.h");
 });
 
-pub const version = "0.2.0";
+pub const version = "0.3.0-dev";
 
 pub const default_debounce_ms: u64 = 250;
 pub const default_wait_usec: u64 = 1_000_000; // journal wait wakeup, 1s
+pub const exit_unsupported_hardware: u8 = 77;
+pub const exit_runtime_unavailable: u8 = 78;
+
+pub const PreflightOutcome = enum {
+    passed,
+    unsupported_hardware,
+    runtime_unavailable,
+    internal_error,
+};
+
+pub const RuntimeProbeResult = enum {
+    ready,
+    unavailable,
+    internal_error,
+};
+
+/// One status contract is shared by the production preflight and the
+/// deterministic fixture runner. A fixture never invents a second mapping.
+pub fn preflightExitStatus(outcome: PreflightOutcome) u8 {
+    return switch (outcome) {
+        .passed => 0,
+        .unsupported_hardware => exit_unsupported_hardware,
+        .runtime_unavailable => exit_runtime_unavailable,
+        .internal_error => 1,
+    };
+}
+
+/// Production journal branches and the fixture runner share this decision.
+/// The fixture supplies a deterministic observation; it does not supply an
+/// exit status.
+pub fn runtimePreflightOutcome(result: RuntimeProbeResult) PreflightOutcome {
+    return switch (result) {
+        .ready => .passed,
+        .unavailable => .runtime_unavailable,
+        .internal_error => .internal_error,
+    };
+}
+
+// These are identity gates, not a compatibility database. They encode only
+// the hardware and WMI path on which the scancode mapping was calibrated.
+pub const SupportedSystemVendor = "MECHREVO";
+pub const SupportedBoardName = "XINGYAO Series-P916F-STX";
+pub const SupportedEventGuid = "ABBC0F5B-8EA1-11D1-A000-C90629100000";
+pub const SupportedMethodGuid = "ABBC0F5C-8EA1-11D1-A000-C90629100000";
+pub const SupportedInputName = "Huawei WMI hotkeys";
+
+const DmiVendorPath = "sys/class/dmi/id/sys_vendor";
+const DmiBoardPath = "sys/class/dmi/id/board_name";
+const WmiDevicesPath = "sys/bus/wmi/devices";
+const HuaweiInputPath = "sys/devices/platform/huawei-wmi/input";
 
 // ---------------------------------------------------------------------------
 // Mode — a separate OEM/firmware power namespace.
@@ -87,6 +140,7 @@ pub fn isFnXRecord(transport: []const u8, syslog_identifier: []const u8, kernel_
 /// MESSAGE must be identical to `_KERNEL_DEVICE=+input:inputN`; this preserves
 /// strict admission without hard-coding the current dynamic input number.
 pub fn modeForMessage(kernel_device: []const u8, message: []const u8) ?Mode {
+    if (kernel_device.len > MaxKernelDeviceLen) return null;
     if (!isInputDevicePath(kernel_device)) return null;
     if (!std.mem.startsWith(u8, message, MessageDevicePrefix)) return null;
 
@@ -104,6 +158,14 @@ pub fn isFnXMessage(kernel_device: []const u8, message: []const u8) bool {
     return modeForMessage(kernel_device, message) != null;
 }
 
+/// Production admission adds the resolved huawei-wmi input identity to the
+/// exact journal-record checks. Keeping this as a pure function makes the
+/// fail-closed source gate testable without a physical Fn+X event.
+pub fn modeForSupportedRecord(expected_kernel_device: []const u8, transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?Mode {
+    if (!std.mem.eql(u8, expected_kernel_device, kernel_device)) return null;
+    return modeForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message);
+}
+
 /// Matches `+input:input` followed by one or more digits. The dynamic
 /// `inputN` suffix is validated, never hard-coded.
 pub fn isInputDevicePath(dev: []const u8) bool {
@@ -115,13 +177,150 @@ pub fn isInputDevicePath(dev: []const u8) bool {
     return true;
 }
 
-/// sd_journal_get_data returns raw `FIELD=value` bytes, possibly with a
-/// trailing newline. Strip both the field name and any trailing newline.
+/// Strip only the `FIELD=` prefix from raw sd_journal_get_data bytes. The API
+/// does not append a presentation newline; a newline in the value is payload
+/// and must remain visible to strict admission.
 pub fn fieldValue(data: []const u8) []const u8 {
     const eq = std.mem.indexOfScalar(u8, data, '=') orelse return data;
-    var v = data[eq + 1 ..];
-    if (v.len > 0 and v[v.len - 1] == '\n') v = v[0 .. v.len - 1];
-    return v;
+    return data[eq + 1 ..];
+}
+
+// ---------------------------------------------------------------------------
+// Calibrated hardware support gate.
+// ---------------------------------------------------------------------------
+
+pub const SupportProbe = struct {
+    kernel_device_buffer: [MaxKernelDeviceLen]u8 = undefined,
+    kernel_device_len: usize,
+
+    pub fn kernelDevice(self: *const SupportProbe) []const u8 {
+        return self.kernel_device_buffer[0..self.kernel_device_len];
+    }
+};
+
+pub const SupportProbeError = error{
+    UnsupportedSystemVendor,
+    UnsupportedBoardName,
+    MissingEventGuid,
+    MissingMethodGuid,
+    MissingHuaweiInput,
+    AmbiguousHuaweiInput,
+};
+
+/// Expected identity mismatches are unsupported hardware. Filesystem, memory,
+/// or other tool failures are internal errors and must not be disguised as an
+/// ordinary unsupported result.
+pub fn supportProbeFailureOutcome(err: anyerror) PreflightOutcome {
+    return switch (err) {
+        SupportProbeError.UnsupportedSystemVendor,
+        SupportProbeError.UnsupportedBoardName,
+        SupportProbeError.MissingEventGuid,
+        SupportProbeError.MissingMethodGuid,
+        SupportProbeError.MissingHuaweiInput,
+        SupportProbeError.AmbiguousHuaweiInput,
+        => .unsupported_hardware,
+        else => .internal_error,
+    };
+}
+
+/// A WMI sysfs device is the exact calibrated UUID plus a decimal instance
+/// suffix (for example `...10000000-0`). UUID prefixes alone are not enough.
+pub fn isWmiGuidInstance(name: []const u8, guid: []const u8) bool {
+    if (name.len < guid.len + 2) return false;
+    if (!std.mem.eql(u8, name[0..guid.len], guid)) return false;
+    if (name[guid.len] != '-') return false;
+    for (name[guid.len + 1 ..]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn readSysfsValue(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, path: []const u8) ![]u8 {
+    const raw = try root.readFileAlloc(io, path, alloc, .limited(4096));
+    defer alloc.free(raw);
+    return alloc.dupe(u8, std.mem.trimEnd(u8, raw, "\r\n"));
+}
+
+fn hasWmiGuid(io: std.Io, root: std.Io.Dir, guid: []const u8) !bool {
+    var devices = try root.openDir(io, WmiDevicesPath, .{ .iterate = true });
+    defer devices.close(io);
+    var iterator = devices.iterate();
+    while (try iterator.next(io)) |entry| {
+        switch (entry.kind) {
+            .directory, .sym_link => {},
+            else => continue,
+        }
+        if (!isWmiGuidInstance(entry.name, guid)) continue;
+        var path_buffer: [WmiDevicesPath.len + 1 + SupportedEventGuid.len + 24]u8 = undefined;
+        const device_path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ WmiDevicesPath, entry.name }) catch continue;
+        var device_dir = root.openDir(io, device_path, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            else => return err,
+        };
+        device_dir.close(io);
+        return true;
+    }
+    return false;
+}
+
+/// Probe a filesystem root for the exact calibrated identity and dynamically
+/// resolve its huawei-wmi inputN. Production passes `/`; tests pass a fixture
+/// root, so no test-only runtime bypass is exposed.
+pub fn probeSupportedHardware(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !SupportProbe {
+    const vendor = try readSysfsValue(alloc, io, root, DmiVendorPath);
+    defer alloc.free(vendor);
+    if (!std.mem.eql(u8, vendor, SupportedSystemVendor)) return SupportProbeError.UnsupportedSystemVendor;
+
+    const board = try readSysfsValue(alloc, io, root, DmiBoardPath);
+    defer alloc.free(board);
+    if (!std.mem.eql(u8, board, SupportedBoardName)) return SupportProbeError.UnsupportedBoardName;
+
+    if (!try hasWmiGuid(io, root, SupportedEventGuid)) return SupportProbeError.MissingEventGuid;
+    if (!try hasWmiGuid(io, root, SupportedMethodGuid)) return SupportProbeError.MissingMethodGuid;
+
+    var input_dir = try root.openDir(io, HuaweiInputPath, .{ .iterate = true });
+    defer input_dir.close(io);
+    var iterator = input_dir.iterate();
+    var result = SupportProbe{ .kernel_device_len = 0 };
+    var found = false;
+    while (try iterator.next(io)) |entry| {
+        if (!isInputDeviceName(entry.name)) continue;
+        const name_path = try std.fmt.allocPrint(alloc, "{s}/{s}/name", .{ HuaweiInputPath, entry.name });
+        defer alloc.free(name_path);
+        const input_name = readSysfsValue(alloc, io, root, name_path) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        defer alloc.free(input_name);
+        if (!std.mem.eql(u8, input_name, SupportedInputName)) continue;
+        if (found) return SupportProbeError.AmbiguousHuaweiInput;
+        const kernel_device = try std.fmt.bufPrint(&result.kernel_device_buffer, "+input:{s}", .{entry.name});
+        result.kernel_device_len = kernel_device.len;
+        found = true;
+    }
+    if (!found) return SupportProbeError.MissingHuaweiInput;
+    return result;
+}
+
+fn isInputDeviceName(name: []const u8) bool {
+    if (name.len < "input".len + 1) return false;
+    if (!std.mem.startsWith(u8, name, "input")) return false;
+    for (name["input".len..]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn supportFailureHint(err: anyerror) []const u8 {
+    return switch (err) {
+        SupportProbeError.UnsupportedSystemVendor => "DMI sys_vendor is not the calibrated MECHREVO value",
+        SupportProbeError.UnsupportedBoardName => "DMI board_name is not the calibrated XINGYAO Series-P916F-STX value",
+        SupportProbeError.MissingEventGuid => "calibrated ABBC0F5B WMI event GUID is missing",
+        SupportProbeError.MissingMethodGuid => "calibrated ABBC0F5C WMI method GUID is missing",
+        SupportProbeError.MissingHuaweiInput => "calibrated Huawei WMI hotkeys input device is missing",
+        SupportProbeError.AmbiguousHuaweiInput => "more than one Huawei WMI hotkeys input device was found",
+        else => "required DMI/WMI/sysfs evidence could not be read",
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -131,22 +330,29 @@ pub fn fieldValue(data: []const u8) []const u8 {
 pub const Debouncer = struct {
     window_ns: u64,
     last_accept_ns: ?u64 = null,
+    last_mode: ?Mode = null,
 
-    /// Accepts the first notification, then rejects duplicates until the
-    /// monotonic window has elapsed.
-    pub fn accept(self: *Debouncer, now_ns: u64) bool {
+    /// Rejects only a duplicate of the same mode inside the window. A distinct
+    /// calibrated mode is a new state report and must not be dropped.
+    pub fn accept(self: *Debouncer, mode: Mode, now_ns: u64) bool {
         if (self.last_accept_ns) |t| {
-            if (now_ns -| t < self.window_ns) return false;
+            if (self.last_mode == mode and now_ns -| t < self.window_ns) return false;
         }
         self.last_accept_ns = now_ns;
+        self.last_mode = mode;
         return true;
     }
 };
 
-fn monotonicNanos() u64 {
+fn monotonicNanos() ?u64 {
     var ts: jl.struct_timespec = undefined;
-    if (jl.clock_gettime(jl.CLOCK_MONOTONIC, &ts) != 0) return 0;
+    if (jl.clock_gettime(jl.CLOCK_MONOTONIC, &ts) != 0) return null;
+    if (ts.tv_sec < 0 or ts.tv_nsec < 0) return null;
     return @as(u64, @intCast(ts.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.tv_nsec));
+}
+
+pub fn debounceWindowNanos(milliseconds: u64) !u64 {
+    return std.math.mul(u64, milliseconds, std.time.ns_per_ms);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +394,11 @@ fn readField(j: *jl.sd_journal, field: [:0]const u8) ?[]const u8 {
     var len: usize = 0;
     if (jl.sd_journal_get_data(j, field, &data, &len) < 0) return null;
     const raw: [*]const u8 = @ptrCast(data.?);
-    return fieldValue(raw[0..len]);
+    const bytes = raw[0..len];
+    if (bytes.len <= field.len) return null;
+    if (!std.mem.eql(u8, bytes[0..field.len], field)) return null;
+    if (bytes[field.len] != '=') return null;
+    return bytes[field.len + 1 ..];
 }
 
 fn fieldEquals(j: *jl.sd_journal, field: [:0]const u8, expected: []const u8) bool {
@@ -196,7 +406,7 @@ fn fieldEquals(j: *jl.sd_journal, field: [:0]const u8, expected: []const u8) boo
     return std.mem.eql(u8, value, expected);
 }
 
-fn currentRecordMode(j: *jl.sd_journal) ?Mode {
+fn currentRecordMode(j: *jl.sd_journal, expected_kernel_device: []const u8) ?Mode {
     // libsystemd only guarantees a value returned by sd_journal_get_data()
     // until the next get-data call. Consume each value before requesting the
     // next field instead of retaining borrowed slices in a JournalEntry.
@@ -207,6 +417,7 @@ fn currentRecordMode(j: *jl.sd_journal) ?Mode {
     const borrowed_device = readField(j, "_KERNEL_DEVICE") orelse return null;
     if (!isInputDevicePath(borrowed_device)) return null;
     if (borrowed_device.len > MaxKernelDeviceLen) return null;
+    if (!std.mem.eql(u8, borrowed_device, expected_kernel_device)) return null;
 
     // Keep a local copy before requesting MESSAGE. This preserves the
     // sd_journal_get_data borrowed-value lifetime discipline above while still
@@ -217,6 +428,43 @@ fn currentRecordMode(j: *jl.sd_journal) ?Mode {
 
     const message = readField(j, "MESSAGE") orelse return null;
     return modeForMessage(device, message);
+}
+
+fn addJournalMatch(j: *jl.sd_journal, match: []const u8) bool {
+    const rc = jl.sd_journal_add_match(j, match.ptr, match.len);
+    if (rc < 0) {
+        std.debug.print("fnx-oem-osd-listener: cannot add journal match '{s}': {s}\n", .{ match, std.mem.span(jl.strerror(-rc)) });
+        return false;
+    }
+    return true;
+}
+
+/// sd_journal_open silently ignores journal files the caller cannot read.
+/// Confirm that at least one kernel entry is visible before entering the
+/// long-running loop, otherwise a permission failure would look healthy.
+fn kernelJournalIsVisible(j: *jl.sd_journal) !bool {
+    const kernel_match = "_TRANSPORT=kernel";
+    if (!addJournalMatch(j, kernel_match)) return error.JournalMatchFailed;
+    defer jl.sd_journal_flush_matches(j);
+
+    const seek_rc = jl.sd_journal_seek_head(j);
+    if (seek_rc < 0) return error.JournalSeekFailed;
+    const next_rc = jl.sd_journal_next(j);
+    if (next_rc < 0) return error.JournalReadFailed;
+    return next_rc > 0;
+}
+
+fn addProductionJournalMatches(alloc: std.mem.Allocator, j: *jl.sd_journal, kernel_device: []const u8) !void {
+    const device_match = try std.fmt.allocPrint(alloc, "_KERNEL_DEVICE={s}", .{kernel_device});
+    defer alloc.free(device_match);
+    for ([_][]const u8{
+        "_TRANSPORT=kernel",
+        "SYSLOG_IDENTIFIER=kernel",
+        "_KERNEL_SUBSYSTEM=input",
+        device_match,
+    }) |match| {
+        if (!addJournalMatch(j, match)) return error.JournalMatchFailed;
+    }
 }
 
 fn spawnIpc(gpa: std.mem.Allocator, io: std.Io, qs_bin: []const u8, qml_config: []const u8, mode: Mode) !void {
@@ -259,6 +507,11 @@ const usage_text = std.fmt.comptimePrint(
     \\  --qml-path PATH        Quickshell config path passed as `qs -p PATH`
     \\                         (the standalone OSD shell; required)
     \\  --debounce-ms N        monotonic debounce window (default: {d})
+    \\  --check-support        validate the calibrated DMI/WMI/input identity,
+    \\                         print the resolved input device, and exit
+    \\  --check-runtime        validate support plus kernel-journal visibility
+    \\                         and strict journal filters, then exit
+    \\  --version              print the listener version and exit
     \\  -h, --help             show this help
     \\
     \\Example:
@@ -280,6 +533,8 @@ pub fn main(init: std.process.Init) !void {
     var qs_bin: []const u8 = "qs";
     var qml_config: ?[]const u8 = null;
     var debounce_ms: u64 = default_debounce_ms;
+    var check_support = false;
+    var check_runtime = false;
 
     const args = init.minimal.args.vector; // []const [*:0]const u8 (Linux + libc)
     var i: usize = 1;
@@ -287,6 +542,10 @@ pub fn main(init: std.process.Init) !void {
         const a = std.mem.span(args[i]);
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             usage();
+            return;
+        } else if (std.mem.eql(u8, a, "--version")) {
+            const text = "fnx-oem-osd-listener " ++ version ++ "\n";
+            _ = jl.write(1, text.ptr, text.len);
             return;
         } else if (std.mem.eql(u8, a, "--qs-bin")) {
             i += 1;
@@ -300,20 +559,68 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) argError("--debounce-ms requires a value");
             debounce_ms = std.fmt.parseInt(u64, std.mem.span(args[i]), 10) catch argError("invalid --debounce-ms");
+        } else if (std.mem.eql(u8, a, "--check-support")) {
+            check_support = true;
+        } else if (std.mem.eql(u8, a, "--check-runtime")) {
+            check_runtime = true;
         } else {
             argError("unknown argument");
         }
     }
-    const qml = qml_config orelse argError("--qml-path is required");
+    const debounce_ns = debounceWindowNanos(debounce_ms) catch argError("--debounce-ms is too large");
+    if (check_support and check_runtime) argError("--check-support and --check-runtime are mutually exclusive");
+    if (!check_support and !check_runtime) {
+        if (qs_bin.len == 0) argError("--qs-bin requires a non-empty value");
+        if (qml_config == null or qml_config.?.len == 0) argError("--qml-path is required and must be non-empty");
+    }
+
+    var system_root = std.Io.Dir.openDirAbsolute(init.io, "/", .{}) catch |err| {
+        std.debug.print("fnx-oem-osd-listener: cannot open filesystem root for support preflight ({s})\n", .{@errorName(err)});
+        std.process.exit(preflightExitStatus(.internal_error));
+    };
+    defer system_root.close(init.io);
+    const support = probeSupportedHardware(alloc, init.io, system_root) catch |err| {
+        const outcome = supportProbeFailureOutcome(err);
+        switch (outcome) {
+            .unsupported_hardware => std.debug.print("fnx-oem-osd-listener: unsupported hardware identity ({s}): {s}. This build remains calibrated for P916F-STX only.\n", .{ @errorName(err), supportFailureHint(err) }),
+            .internal_error => std.debug.print("fnx-oem-osd-listener: cannot verify hardware identity ({s}): {s}\n", .{ @errorName(err), supportFailureHint(err) }),
+            else => unreachable,
+        }
+        std.process.exit(preflightExitStatus(outcome));
+    };
+
+    if (check_support) {
+        std.debug.print("fnx-oem-osd-listener: calibrated P916F-STX support identity passed (kernel_device={s}). This does not re-run physical mode calibration.\n", .{support.kernelDevice()});
+        return;
+    }
 
     // ---- journal: seek to tail, then consume only later entries ----
     var journal: ?*jl.sd_journal = null;
-    const rc = jl.sd_journal_open(&journal, jl.SD_JOURNAL_LOCAL_ONLY);
+    const rc = jl.sd_journal_open(&journal, jl.SD_JOURNAL_LOCAL_ONLY | jl.SD_JOURNAL_SYSTEM);
     if (rc < 0) {
         std.debug.print("fnx-oem-osd-listener: cannot open system journal: {s}\n", .{std.mem.span(jl.strerror(-rc))});
-        std.process.exit(1);
+        std.process.exit(preflightExitStatus(runtimePreflightOutcome(.internal_error)));
     }
     defer jl.sd_journal_close(journal.?);
+
+    const kernel_visible = kernelJournalIsVisible(journal.?) catch |err| {
+        std.debug.print("fnx-oem-osd-listener: cannot verify kernel-journal visibility ({s})\n", .{@errorName(err)});
+        std.process.exit(preflightExitStatus(runtimePreflightOutcome(.internal_error)));
+    };
+    if (!kernel_visible) {
+        std.debug.print("fnx-oem-osd-listener: no kernel journal entries are visible to this user; the Fn+X record cannot be observed. Fix journal permissions and log in again.\n", .{});
+        std.process.exit(preflightExitStatus(runtimePreflightOutcome(.unavailable)));
+    }
+    addProductionJournalMatches(alloc, journal.?, support.kernelDevice()) catch |err| {
+        std.debug.print("fnx-oem-osd-listener: cannot install strict journal matches ({s})\n", .{@errorName(err)});
+        std.process.exit(preflightExitStatus(runtimePreflightOutcome(.internal_error)));
+    };
+    if (check_runtime) {
+        std.debug.print("fnx-oem-osd-listener: runtime prerequisites passed (hardware=P916F-STX, kernel_device={s}, kernel_journal=visible, strict_filters=installed). This does not simulate Fn+X, OEM power changes, IPC, or visible presentation.\n", .{support.kernelDevice()});
+        return;
+    }
+
+    const qml = qml_config.?;
 
     const seek_rc = jl.sd_journal_seek_tail(journal.?);
     if (seek_rc < 0) {
@@ -326,9 +633,9 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    std.debug.print("fnx-oem-osd-listener {s}: listening (mapping=0x0041:balanced,0x0042:performance, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, qs_bin, qml, debounce_ms });
+    std.debug.print("fnx-oem-osd-listener {s}: listening (hardware=P916F-STX, device={s}, mapping=0x0041:balanced,0x0042:performance, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, support.kernelDevice(), qs_bin, qml, debounce_ms });
 
-    var debouncer = Debouncer{ .window_ns = debounce_ms * std.time.ns_per_ms };
+    var debouncer = Debouncer{ .window_ns = debounce_ns };
 
     while (true) {
         const n = jl.sd_journal_next(journal.?);
@@ -346,10 +653,14 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
 
-        const mode = currentRecordMode(journal.?) orelse continue;
-        if (!debouncer.accept(monotonicNanos())) {
-            std.debug.print("fnx-oem-osd-listener: duplicate Fn+X WMI notification within debounce window; ignored.\n", .{});
-            continue;
+        const mode = currentRecordMode(journal.?, support.kernelDevice()) orelse continue;
+        if (monotonicNanos()) |now_ns| {
+            if (!debouncer.accept(mode, now_ns)) {
+                std.debug.print("fnx-oem-osd-listener: duplicate {s} Fn+X WMI notification within debounce window; ignored.\n", .{mode.label()});
+                continue;
+            }
+        } else {
+            std.debug.print("fnx-oem-osd-listener: monotonic clock unavailable; processing event without debounce.\n", .{});
         }
 
         std.debug.print("fnx-oem-osd-listener: Fn+X confirmed; scancode {s} maps to {s}.\n", .{ mode.scancode(), mode.label() });
@@ -397,6 +708,7 @@ test "admission: rejects wrong message" {
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x41"));
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "Unknown key pressed, code: 0x0042"));
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed"));
+    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", test_msg_0042 ++ "\n"));
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", ""));
 }
 
@@ -404,6 +716,11 @@ test "admission: message inputN must agree with kernel device" {
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input9: Unknown key pressed, code: 0x0042"));
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input80: Unknown key pressed, code: 0x0042"));
     try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input08: Unknown key pressed, code: 0x0042"));
+}
+
+test "admission: production source must be the resolved huawei-wmi input" {
+    try std.testing.expectEqual(Mode.performance, modeForSupportedRecord("+input:input8", "kernel", "kernel", "input", "+input:input8", test_msg_0042).?);
+    try std.testing.expectEqual(@as(?Mode, null), modeForSupportedRecord("+input:input5", "kernel", "kernel", "input", "+input:input8", test_msg_0042));
 }
 
 test "admission: rejects missing or malformed kernel device" {
@@ -422,13 +739,18 @@ test "admission: dynamic inputN suffix is accepted, never hard-coded" {
     try std.testing.expect(isFnXRecord("kernel", "kernel", "input", "+input:input42", "input input42: Unknown key pressed, code: 0x0041"));
 }
 
-test "fieldValue strips FIELD= prefix and trailing newline" {
-    try std.testing.expectEqualStrings("kernel", fieldValue("_TRANSPORT=kernel\n"));
-    try std.testing.expectEqualStrings("kernel", fieldValue("SYSLOG_IDENTIFIER=kernel\n"));
-    try std.testing.expectEqualStrings("+input:input8", fieldValue("_KERNEL_DEVICE=+input:input8\n"));
-    try std.testing.expectEqualStrings(test_msg_0042, fieldValue("MESSAGE=" ++ test_msg_0042 ++ "\n"));
-    // values without trailing newline are handled too
+test "admission: oversized kernel-device identity is rejected by the pure seam" {
+    const oversized = "+input:input123456789012345678901234567890123456789012345678901234567890";
+    const message = "input input123456789012345678901234567890123456789012345678901234567890: Unknown key pressed, code: 0x0042";
+    try std.testing.expect(oversized.len > MaxKernelDeviceLen);
+    try std.testing.expectEqual(@as(?Mode, null), modeForMessage(oversized, message));
+}
+
+test "fieldValue strips only FIELD= and preserves value bytes exactly" {
     try std.testing.expectEqualStrings("kernel", fieldValue("_TRANSPORT=kernel"));
+    try std.testing.expectEqualStrings("kernel\n", fieldValue("_TRANSPORT=kernel\n"));
+    try std.testing.expectEqualStrings(test_msg_0042, fieldValue("MESSAGE=" ++ test_msg_0042));
+    try std.testing.expectEqualStrings(test_msg_0042 ++ "\n", fieldValue("MESSAGE=" ++ test_msg_0042 ++ "\n"));
 }
 
 test "mapping: malformed or unsupported messages have no mode" {
@@ -444,16 +766,110 @@ test "labels are the exact IPC tokens" {
     try std.testing.expectEqualStrings("0x0041", Mode.balanced.scancode());
 }
 
-test "debounce: first accept, duplicate rejected, window elapse accepts" {
+test "debounce: same-mode duplicate is rejected but a distinct mode is admitted" {
     var d = Debouncer{ .window_ns = 1_000_000_000 };
-    try std.testing.expect(d.accept(100));
-    try std.testing.expect(!d.accept(500)); // within window
-    try std.testing.expect(!d.accept(1_000)); // within window
-    try std.testing.expect(d.accept(1_000_000_100)); // 1s+ window elapsed
+    try std.testing.expect(d.accept(.balanced, 100));
+    try std.testing.expect(!d.accept(.balanced, 500)); // same mode inside window
+    try std.testing.expect(d.accept(.performance, 1_000)); // distinct state report
+    try std.testing.expect(!d.accept(.performance, 2_000));
+    try std.testing.expect(d.accept(.performance, 1_000_001_000)); // window elapsed
     // a fresh debouncer accepts immediately
     var d2 = Debouncer{ .window_ns = 0 };
-    try std.testing.expect(d2.accept(1));
-    try std.testing.expect(d2.accept(2));
+    try std.testing.expect(d2.accept(.balanced, 1));
+    try std.testing.expect(d2.accept(.balanced, 2));
+}
+
+test "debounce window conversion rejects overflow" {
+    try std.testing.expectEqual(@as(u64, 250 * std.time.ns_per_ms), try debounceWindowNanos(250));
+    try std.testing.expectError(error.Overflow, debounceWindowNanos(std.math.maxInt(u64)));
+}
+
+test "support gate: WMI identity requires the complete UUID and decimal instance" {
+    try std.testing.expect(isWmiGuidInstance(SupportedEventGuid ++ "-0", SupportedEventGuid));
+    try std.testing.expect(isWmiGuidInstance(SupportedMethodGuid ++ "-12", SupportedMethodGuid));
+    try std.testing.expect(!isWmiGuidInstance("ABBC0F5B-0", SupportedEventGuid));
+    try std.testing.expect(!isWmiGuidInstance(SupportedEventGuid, SupportedEventGuid));
+    try std.testing.expect(!isWmiGuidInstance(SupportedEventGuid ++ "-x", SupportedEventGuid));
+    try std.testing.expect(!isWmiGuidInstance(SupportedEventGuid ++ "-0-extra", SupportedEventGuid));
+}
+
+test "preflight status contract is exact and fail-closed" {
+    try std.testing.expectEqual(@as(u8, 0), preflightExitStatus(.passed));
+    try std.testing.expectEqual(@as(u8, 77), preflightExitStatus(.unsupported_hardware));
+    try std.testing.expectEqual(@as(u8, 78), preflightExitStatus(.runtime_unavailable));
+    try std.testing.expectEqual(@as(u8, 1), preflightExitStatus(.internal_error));
+    try std.testing.expectEqual(PreflightOutcome.passed, runtimePreflightOutcome(.ready));
+    try std.testing.expectEqual(PreflightOutcome.runtime_unavailable, runtimePreflightOutcome(.unavailable));
+    try std.testing.expectEqual(PreflightOutcome.internal_error, runtimePreflightOutcome(.internal_error));
+
+    try std.testing.expectEqual(PreflightOutcome.unsupported_hardware, supportProbeFailureOutcome(SupportProbeError.UnsupportedSystemVendor));
+    try std.testing.expectEqual(PreflightOutcome.unsupported_hardware, supportProbeFailureOutcome(SupportProbeError.AmbiguousHuaweiInput));
+    try std.testing.expectEqual(PreflightOutcome.internal_error, supportProbeFailureOutcome(error.FileNotFound));
+    try std.testing.expectEqual(PreflightOutcome.internal_error, supportProbeFailureOutcome(error.AccessDenied));
+}
+
+test "support gate: filesystem fixture resolves only the calibrated input" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "sys/class/dmi/id");
+    try tmp.dir.createDirPath(io, "sys/bus/wmi/devices/" ++ SupportedEventGuid ++ "-0");
+    try tmp.dir.createDirPath(io, "sys/bus/wmi/devices/" ++ SupportedMethodGuid ++ "-1");
+    try tmp.dir.createDirPath(io, "sys/devices/platform/huawei-wmi/input/input42");
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiVendorPath, .data = SupportedSystemVendor ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiBoardPath, .data = SupportedBoardName ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = HuaweiInputPath ++ "/input42/name", .data = SupportedInputName ++ "\n" });
+
+    const support = try probeSupportedHardware(std.testing.allocator, io, tmp.dir);
+    try std.testing.expectEqualStrings("+input:input42", support.kernelDevice());
+}
+
+test "support gate: every missing or ambiguous identity layer fails closed" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "sys/class/dmi/id");
+    try tmp.dir.createDirPath(io, WmiDevicesPath);
+    try tmp.dir.createDirPath(io, HuaweiInputPath);
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiVendorPath, .data = "OTHER" });
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiBoardPath, .data = "some-other-board" });
+    try std.testing.expectError(SupportProbeError.UnsupportedSystemVendor, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiVendorPath, .data = SupportedSystemVendor ++ " \n" });
+    try std.testing.expectError(SupportProbeError.UnsupportedSystemVendor, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiVendorPath, .data = SupportedSystemVendor });
+    try std.testing.expectError(SupportProbeError.UnsupportedBoardName, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = DmiBoardPath, .data = SupportedBoardName });
+    try std.testing.expectError(SupportProbeError.MissingEventGuid, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    // Neither a dangling symlink nor a regular file whose basename resembles
+    // the GUID is a WMI device.
+    try tmp.dir.symLink(io, "missing-wmi-device", WmiDevicesPath ++ "/" ++ SupportedEventGuid ++ "-0", .{ .is_directory = true });
+    try std.testing.expectError(SupportProbeError.MissingEventGuid, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+    try tmp.dir.deleteFile(io, WmiDevicesPath ++ "/" ++ SupportedEventGuid ++ "-0");
+
+    try tmp.dir.writeFile(io, .{ .sub_path = WmiDevicesPath ++ "/" ++ SupportedEventGuid ++ "-0", .data = "not a device" });
+    try std.testing.expectError(SupportProbeError.MissingEventGuid, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+    try tmp.dir.deleteFile(io, WmiDevicesPath ++ "/" ++ SupportedEventGuid ++ "-0");
+
+    try tmp.dir.createDirPath(io, WmiDevicesPath ++ "/" ++ SupportedEventGuid ++ "-0");
+    try std.testing.expectError(SupportProbeError.MissingMethodGuid, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.createDirPath(io, WmiDevicesPath ++ "/" ++ SupportedMethodGuid ++ "-1");
+    try std.testing.expectError(SupportProbeError.MissingHuaweiInput, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.createDirPath(io, HuaweiInputPath ++ "/input5");
+    try tmp.dir.writeFile(io, .{ .sub_path = HuaweiInputPath ++ "/input5/name", .data = SupportedInputName });
+    const support = try probeSupportedHardware(std.testing.allocator, io, tmp.dir);
+    try std.testing.expectEqualStrings("+input:input5", support.kernelDevice());
+
+    try tmp.dir.createDirPath(io, HuaweiInputPath ++ "/input6");
+    try tmp.dir.writeFile(io, .{ .sub_path = HuaweiInputPath ++ "/input6/name", .data = SupportedInputName });
+    try std.testing.expectError(SupportProbeError.AmbiguousHuaweiInput, probeSupportedHardware(std.testing.allocator, io, tmp.dir));
 }
 
 test "ipc argv: exact zero-argument wrapper argv for noctalia-qs 0.0.12" {

@@ -16,7 +16,6 @@ pub fn build(b: *std.Build) void {
     // Libs: line (systemd-libs split), so pkg-config resolves it to nothing;
     // direct -lsystemd search works.
     mod.linkSystemLibrary("systemd", .{ .use_pkg_config = .no });
-
     const exe = b.addExecutable(.{
         .name = "fnx-oem-osd-listener",
         .root_module = mod,
@@ -27,8 +26,37 @@ pub fn build(b: *std.Build) void {
     exe.use_new_linker = false;
     b.installArtifact(exe);
 
+    // A separately built, non-production fixture runner exercises the exact
+    // support probe and preflight status mapping against disposable roots.
+    // It is available only through `zig build cli-fixture` and is never part
+    // of the default install graph.
+    const cli_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("tests/cli_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_fixture_mod.addImport("listener", mod);
+    cli_fixture_mod.linkSystemLibrary("systemd", .{ .use_pkg_config = .no });
+    const cli_fixture = b.addExecutable(.{
+        .name = "fnx-oem-osd-cli-fixture",
+        .root_module = cli_fixture_mod,
+        .use_lld = false,
+    });
+    cli_fixture.use_new_linker = false;
+    const install_cli_fixture = b.addInstallArtifact(cli_fixture, .{});
+    const cli_fixture_step = b.step("cli-fixture", "Build the deterministic CLI preflight fixture runner");
+    cli_fixture_step.dependOn(&install_cli_fixture.step);
+
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_mod.linkSystemLibrary("systemd", .{ .use_pkg_config = .no });
     const unit_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = test_mod,
         .use_lld = false,
     });
     unit_tests.use_new_linker = false;
