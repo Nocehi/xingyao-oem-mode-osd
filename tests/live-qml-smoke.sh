@@ -1,7 +1,8 @@
 #!/bin/sh
 # Session-dependent, hardware-free Quickshell IPC smoke.
-# This briefly displays three OSD states in the current Wayland session. It is
-# intentionally not part of scripts/check.sh or headless CI.
+# This invokes every supported OSD state plus the compatibility fallback in a
+# temporary Quickshell process. It validates IPC/handler liveness, not visible
+# presentation, and is intentionally outside scripts/check.sh and headless CI.
 set -eu
 
 cd "$(dirname -- "$0")/.."
@@ -49,7 +50,11 @@ if [ "$ready" != true ]; then
     exit 1
 fi
 
-for function_name in showPerformance showBalanced showUnknown; do
+for function_name in \
+    showPerformance showBalanced \
+    showKeyboardOff showKeyboardLow showKeyboardHigh \
+    showTouchpadOff showTouchpadOn \
+    showUnknown; do
     output_file="$smoke_root/$function_name.log"
     qs -p "$smoke_root/qml" ipc call fnx-oem-osd "$function_name" > "$output_file"
     grep -F 'FNX_OSD_SHOW_OK' "$output_file" >/dev/null || {
@@ -70,10 +75,21 @@ kill "$smoke_pid"
 wait "$smoke_pid" 2>/dev/null || :
 smoke_pid=
 
-if grep -E -i 'error|failed|fatal' "$smoke_root/qs.log" >/dev/null; then
+fatal_log="$smoke_root/fatal.log"
+if grep -E '^[[:space:]]*(ERROR|CRITICAL|FATAL)([[:space:]:]|$)' \
+    "$smoke_root/qs.log" > "$fatal_log"; then
     sed -n '1,200p' "$smoke_root/qs.log" >&2
-    printf 'live-qml-smoke.sh: Quickshell logged an error\n' >&2
+    printf 'live-qml-smoke.sh: Quickshell logged an error-severity entry\n' >&2
     exit 1
+fi
+
+# Preserve warnings for the operator without treating message text such as
+# "Failed to register with host portal" as an error-severity entry.
+warning_log="$smoke_root/warnings.log"
+if grep -E '^[[:space:]]*WARN([[:space:]:]|$)' \
+    "$smoke_root/qs.log" > "$warning_log"; then
+    printf 'live-qml-smoke.sh: non-fatal Quickshell warning(s):\n' >&2
+    sed -n '1,120p' "$warning_log" >&2
 fi
 
 printf 'live-qml-smoke.sh: IPC round-trip passed; visible presentation still requires observation\n'

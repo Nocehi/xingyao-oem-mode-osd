@@ -1,9 +1,8 @@
 //! fnx-oem-osd-listener
 //!
-//! Observes the systemd journal for the P916F-STX Fn+X ACPI WMI notification
-//! (`0x0041` / `0x0042` unknown-key records from the kernel input subsystem)
-//! and
-//! drives the standalone Quickshell OSD through Quickshell IPC.
+//! Observes the systemd journal for the supported P916F-STX OEM-key ACPI WMI
+//! notifications and drives the standalone Quickshell OSD through Quickshell
+//! IPC.
 //!
 //! Design rules (see README.md for the full evidence chain):
 //!   * No evdev listener, key grab, key injection, udev/hwdb remap or
@@ -15,14 +14,15 @@
 //!   * Strict admission: kernel transport + kernel identifier + input
 //!     subsystem + the dynamically resolved `Huawei WMI hotkeys` input device
 //!     + exact message whose `inputN` agrees with that device and whose code is
-//!     0x0041 or 0x0042. The `N` in `inputN` is never hard-coded.
+//!     one of the seven display-only codes calibrated on this board. The `N`
+//!     in `inputN` is never hard-coded.
 //!   * Fail-closed hardware preflight for the calibrated P916F-STX DMI, WMI
 //!     GUID pair, huawei-wmi platform path, and input-device identity.
-//!   * Per-mode monotonic debounce against duplicate WMI notifications.
-//!   * Fn+X is an OEM mode namespace. The author-transcribed A -> B -> A
-//!     calibration summary binds 0x0041 to balanced and 0x0042 to performance.
-//!     The listener maps each admitted scancode directly; it has no seed or
-//!     toggle state.
+//!   * Exact-event monotonic debounce against duplicate WMI notifications.
+//!   * Each admitted scancode maps directly to a typed state already formed by
+//!     firmware/EC: keyboard backlight off/low/high, touchpad off/on, or OEM
+//!     balanced/performance mode. The listener has no seed or toggle state and
+//!     never performs the hardware action.
 //!   * Quickshell IPC is invoked without a shell (argv-only) and its exit
 //!     status is checked; a failure is reported, never claimed as shown.
 
@@ -90,24 +90,66 @@ const WmiDevicesPath = "sys/bus/wmi/devices";
 const HuaweiInputPath = "sys/devices/platform/huawei-wmi/input";
 
 // ---------------------------------------------------------------------------
-// Mode — a separate OEM/firmware power namespace.
+// Typed OEM display events. This closed enum is the only production mapping
+// from an admitted code to semantic state and from semantic state to IPC.
 // ---------------------------------------------------------------------------
 
-pub const Mode = enum {
-    performance,
-    balanced,
+pub const OemFeature = enum {
+    performance_mode,
+    keyboard_backlight,
+    touchpad,
+};
 
-    pub fn label(m: Mode) []const u8 {
-        return switch (m) {
-            .performance => "performance",
-            .balanced => "balanced",
+pub const OemEvent = enum {
+    mode_balanced,
+    mode_performance,
+    keyboard_backlight_off,
+    keyboard_backlight_low,
+    keyboard_backlight_high,
+    touchpad_off,
+    touchpad_on,
+
+    pub fn token(event: OemEvent) []const u8 {
+        return switch (event) {
+            .mode_balanced => "balanced",
+            .mode_performance => "performance",
+            .keyboard_backlight_off => "keyboard-backlight-off",
+            .keyboard_backlight_low => "keyboard-backlight-low",
+            .keyboard_backlight_high => "keyboard-backlight-high",
+            .touchpad_off => "touchpad-off",
+            .touchpad_on => "touchpad-on",
         };
     }
 
-    pub fn scancode(m: Mode) []const u8 {
-        return switch (m) {
-            .performance => "0x0042",
-            .balanced => "0x0041",
+    pub fn feature(event: OemEvent) OemFeature {
+        return switch (event) {
+            .mode_balanced, .mode_performance => .performance_mode,
+            .keyboard_backlight_off, .keyboard_backlight_low, .keyboard_backlight_high => .keyboard_backlight,
+            .touchpad_off, .touchpad_on => .touchpad,
+        };
+    }
+
+    pub fn scancode(event: OemEvent) []const u8 {
+        return switch (event) {
+            .keyboard_backlight_off => "0x0020",
+            .keyboard_backlight_low => "0x0021",
+            .keyboard_backlight_high => "0x0022",
+            .touchpad_off => "0x0030",
+            .touchpad_on => "0x0031",
+            .mode_balanced => "0x0041",
+            .mode_performance => "0x0042",
+        };
+    }
+
+    pub fn ipcFunction(event: OemEvent) []const u8 {
+        return switch (event) {
+            .mode_balanced => "showBalanced",
+            .mode_performance => "showPerformance",
+            .keyboard_backlight_off => "showKeyboardOff",
+            .keyboard_backlight_low => "showKeyboardLow",
+            .keyboard_backlight_high => "showKeyboardHigh",
+            .touchpad_off => "showTouchpadOff",
+            .touchpad_on => "showTouchpadOn",
         };
     }
 };
@@ -119,27 +161,26 @@ pub const Mode = enum {
 pub const InputDevicePrefix = "+input:input";
 pub const KernelDevicePrefix = "+input:";
 pub const MessageDevicePrefix = "input ";
-pub const MessageSuffix0041 = ": Unknown key pressed, code: 0x0041";
-pub const MessageSuffix0042 = ": Unknown key pressed, code: 0x0042";
+pub const UnknownKeyCodePrefix = ": Unknown key pressed, code: ";
 pub const MaxKernelDeviceLen = 64;
 
-/// Returns the calibrated OEM mode only for the exact kernel/input record
-/// shape captured on this host. All five fields must match.
-pub fn modeForRecord(transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?Mode {
+/// Returns a calibrated display-only event only for the exact kernel/input
+/// record shape captured on this host. All five fields must match.
+pub fn eventForRecord(transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?OemEvent {
     if (!std.mem.eql(u8, transport, "kernel")) return null;
     if (!std.mem.eql(u8, syslog_identifier, "kernel")) return null;
     if (!std.mem.eql(u8, kernel_subsystem, "input")) return null;
-    return modeForMessage(kernel_device, message);
+    return eventForMessage(kernel_device, message);
 }
 
-pub fn isFnXRecord(transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) bool {
-    return modeForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message) != null;
+pub fn isOemEventRecord(transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) bool {
+    return eventForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message) != null;
 }
 
-/// Accepts only the two live-captured Fn+X message codes. The `inputN` in
+/// Accepts only the seven current-board display-only codes. The `inputN` in
 /// MESSAGE must be identical to `_KERNEL_DEVICE=+input:inputN`; this preserves
 /// strict admission without hard-coding the current dynamic input number.
-pub fn modeForMessage(kernel_device: []const u8, message: []const u8) ?Mode {
+pub fn eventForMessage(kernel_device: []const u8, message: []const u8) ?OemEvent {
     if (kernel_device.len > MaxKernelDeviceLen) return null;
     if (!isInputDevicePath(kernel_device)) return null;
     if (!std.mem.startsWith(u8, message, MessageDevicePrefix)) return null;
@@ -149,21 +190,23 @@ pub fn modeForMessage(kernel_device: []const u8, message: []const u8) ?Mode {
     if (!std.mem.startsWith(u8, after_prefix, input_name)) return null;
 
     const suffix = after_prefix[input_name.len..];
-    if (std.mem.eql(u8, suffix, MessageSuffix0041)) return .balanced;
-    if (std.mem.eql(u8, suffix, MessageSuffix0042)) return .performance;
-    return null;
+    if (!std.mem.startsWith(u8, suffix, UnknownKeyCodePrefix)) return null;
+    return eventForScancode(suffix[UnknownKeyCodePrefix.len..]);
 }
 
-pub fn isFnXMessage(kernel_device: []const u8, message: []const u8) bool {
-    return modeForMessage(kernel_device, message) != null;
+pub fn eventForScancode(scancode: []const u8) ?OemEvent {
+    inline for (std.enums.values(OemEvent)) |event| {
+        if (std.mem.eql(u8, scancode, event.scancode())) return event;
+    }
+    return null;
 }
 
 /// Production admission adds the resolved huawei-wmi input identity to the
 /// exact journal-record checks. Keeping this as a pure function makes the
-/// fail-closed source gate testable without a physical Fn+X event.
-pub fn modeForSupportedRecord(expected_kernel_device: []const u8, transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?Mode {
+/// fail-closed source gate testable without a physical OEM-key event.
+pub fn eventForSupportedRecord(expected_kernel_device: []const u8, transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?OemEvent {
     if (!std.mem.eql(u8, expected_kernel_device, kernel_device)) return null;
-    return modeForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message);
+    return eventForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message);
 }
 
 /// Matches `+input:input` followed by one or more digits. The dynamic
@@ -330,16 +373,16 @@ fn supportFailureHint(err: anyerror) []const u8 {
 pub const Debouncer = struct {
     window_ns: u64,
     last_accept_ns: ?u64 = null,
-    last_mode: ?Mode = null,
+    last_event: ?OemEvent = null,
 
-    /// Rejects only a duplicate of the same mode inside the window. A distinct
-    /// calibrated mode is a new state report and must not be dropped.
-    pub fn accept(self: *Debouncer, mode: Mode, now_ns: u64) bool {
+    /// Rejects only an identical semantic event inside the window. A distinct
+    /// state or feature is a new report and must not be dropped.
+    pub fn accept(self: *Debouncer, event: OemEvent, now_ns: u64) bool {
         if (self.last_accept_ns) |t| {
-            if (self.last_mode == mode and now_ns -| t < self.window_ns) return false;
+            if (self.last_event == event and now_ns -| t < self.window_ns) return false;
         }
         self.last_accept_ns = now_ns;
-        self.last_mode = mode;
+        self.last_event = event;
         return true;
     }
 };
@@ -356,24 +399,18 @@ pub fn debounceWindowNanos(milliseconds: u64) !u64 {
 }
 
 // ---------------------------------------------------------------------------
-// IPC argv construction (no shell involved).
+// IPC argv construction (no shell involved). OemEvent.ipcFunction() above is
+// the one canonical semantic-event-to-QML mapping.
 // ---------------------------------------------------------------------------
 
-pub fn ipcFunction(mode: Mode) []const u8 {
-    return switch (mode) {
-        .performance => "showPerformance",
-        .balanced => "showBalanced",
-    };
-}
-
 /// argv equivalent of:
-/// qs -p <qml-config-path> ipc call fnx-oem-osd showPerformance|showBalanced
+/// qs -p <qml-config-path> ipc call fnx-oem-osd <zero-argument-wrapper>
 ///
 /// noctalia-qs 0.0.12 rejects positional function arguments on `ipc call`
 /// (exit 109), although its deprecated `msg` path accepts them. Zero-argument
 /// wrappers retain the supported `ipc call` transport without relying on that
 /// deprecated fallback.
-pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const u8, mode: Mode) ![][]const u8 {
+pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const u8, event: OemEvent) ![][]const u8 {
     return alloc.dupe([]const u8, &.{
         qs_bin,
         "-p",
@@ -381,7 +418,7 @@ pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const
         "ipc",
         "call",
         "fnx-oem-osd",
-        ipcFunction(mode),
+        event.ipcFunction(),
     });
 }
 
@@ -406,7 +443,7 @@ fn fieldEquals(j: *jl.sd_journal, field: [:0]const u8, expected: []const u8) boo
     return std.mem.eql(u8, value, expected);
 }
 
-fn currentRecordMode(j: *jl.sd_journal, expected_kernel_device: []const u8) ?Mode {
+fn currentRecordEvent(j: *jl.sd_journal, expected_kernel_device: []const u8) ?OemEvent {
     // libsystemd only guarantees a value returned by sd_journal_get_data()
     // until the next get-data call. Consume each value before requesting the
     // next field instead of retaining borrowed slices in a JournalEntry.
@@ -427,7 +464,7 @@ fn currentRecordMode(j: *jl.sd_journal, expected_kernel_device: []const u8) ?Mod
     const device = device_buffer[0..borrowed_device.len];
 
     const message = readField(j, "MESSAGE") orelse return null;
-    return modeForMessage(device, message);
+    return eventForMessage(device, message);
 }
 
 fn addJournalMatch(j: *jl.sd_journal, match: []const u8) bool {
@@ -467,8 +504,8 @@ fn addProductionJournalMatches(alloc: std.mem.Allocator, j: *jl.sd_journal, kern
     }
 }
 
-fn spawnIpc(gpa: std.mem.Allocator, io: std.Io, qs_bin: []const u8, qml_config: []const u8, mode: Mode) !void {
-    const argv = try ipcArgv(gpa, qs_bin, qml_config, mode);
+fn spawnIpc(gpa: std.mem.Allocator, io: std.Io, qs_bin: []const u8, qml_config: []const u8, event: OemEvent) !void {
+    const argv = try ipcArgv(gpa, qs_bin, qml_config, event);
     defer gpa.free(argv);
     const res = try std.process.run(gpa, io, .{
         .argv = argv,
@@ -497,8 +534,8 @@ fn usage() void {
 
 const usage_text = std.fmt.comptimePrint(
     \\fnx-oem-osd-listener {s}
-    \\Observes the systemd journal for the P916F-STX Fn+X ACPI WMI notification and
-    \\drives the standalone Quickshell OSD via IPC.
+    \\Observes the systemd journal for supported P916F-STX display-only OEM-key
+    \\notifications and drives the standalone Quickshell OSD via IPC.
     \\
     \\Usage: fnx-oem-osd-listener [options]
     \\
@@ -590,7 +627,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (check_support) {
-        std.debug.print("fnx-oem-osd-listener: calibrated P916F-STX support identity passed (kernel_device={s}). This does not re-run physical mode calibration.\n", .{support.kernelDevice()});
+        std.debug.print("fnx-oem-osd-listener: calibrated P916F-STX support identity passed (kernel_device={s}). This does not re-run physical OEM-event calibration.\n", .{support.kernelDevice()});
         return;
     }
 
@@ -608,7 +645,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(preflightExitStatus(runtimePreflightOutcome(.internal_error)));
     };
     if (!kernel_visible) {
-        std.debug.print("fnx-oem-osd-listener: no kernel journal entries are visible to this user; the Fn+X record cannot be observed. Fix journal permissions and log in again.\n", .{});
+        std.debug.print("fnx-oem-osd-listener: no kernel journal entries are visible to this user; supported OEM-key records cannot be observed. Fix journal permissions and log in again.\n", .{});
         std.process.exit(preflightExitStatus(runtimePreflightOutcome(.unavailable)));
     }
     addProductionJournalMatches(alloc, journal.?, support.kernelDevice()) catch |err| {
@@ -616,7 +653,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(preflightExitStatus(runtimePreflightOutcome(.internal_error)));
     };
     if (check_runtime) {
-        std.debug.print("fnx-oem-osd-listener: runtime prerequisites passed (hardware=P916F-STX, kernel_device={s}, kernel_journal=visible, strict_filters=installed). This does not simulate Fn+X, OEM power changes, IPC, or visible presentation.\n", .{support.kernelDevice()});
+        std.debug.print("fnx-oem-osd-listener: runtime prerequisites passed (hardware=P916F-STX, kernel_device={s}, kernel_journal=visible, strict_filters=installed). This does not trigger an OEM key, change hardware state, call IPC, or prove visible presentation.\n", .{support.kernelDevice()});
         return;
     }
 
@@ -633,7 +670,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    std.debug.print("fnx-oem-osd-listener {s}: listening (hardware=P916F-STX, device={s}, mapping=0x0041:balanced,0x0042:performance, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, support.kernelDevice(), qs_bin, qml, debounce_ms });
+    std.debug.print("fnx-oem-osd-listener {s}: listening (hardware=P916F-STX, device={s}, mapping=0x0020:keyboard-off,0x0021:keyboard-low,0x0022:keyboard-high,0x0030:touchpad-off,0x0031:touchpad-on,0x0041:balanced,0x0042:performance, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, support.kernelDevice(), qs_bin, qml, debounce_ms });
 
     var debouncer = Debouncer{ .window_ns = debounce_ns };
 
@@ -653,18 +690,18 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
 
-        const mode = currentRecordMode(journal.?, support.kernelDevice()) orelse continue;
+        const event = currentRecordEvent(journal.?, support.kernelDevice()) orelse continue;
         if (monotonicNanos()) |now_ns| {
-            if (!debouncer.accept(mode, now_ns)) {
-                std.debug.print("fnx-oem-osd-listener: duplicate {s} Fn+X WMI notification within debounce window; ignored.\n", .{mode.label()});
+            if (!debouncer.accept(event, now_ns)) {
+                std.debug.print("fnx-oem-osd-listener: duplicate {s} OEM event within debounce window; ignored.\n", .{event.token()});
                 continue;
             }
         } else {
             std.debug.print("fnx-oem-osd-listener: monotonic clock unavailable; processing event without debounce.\n", .{});
         }
 
-        std.debug.print("fnx-oem-osd-listener: Fn+X confirmed; scancode {s} maps to {s}.\n", .{ mode.scancode(), mode.label() });
-        spawnIpc(alloc, init.io, qs_bin, qml, mode) catch |err| {
+        std.debug.print("fnx-oem-osd-listener: OEM event confirmed; scancode {s} maps to {s} ({s}).\n", .{ event.scancode(), event.token(), @tagName(event.feature()) });
+        spawnIpc(alloc, init.io, qs_bin, qml, event) catch |err| {
             std.debug.print("fnx-oem-osd-listener: IPC invocation failed ({s}); not claiming the OSD displayed.\n", .{@errorName(err)});
         };
     }
@@ -676,59 +713,94 @@ pub fn main(init: std.process.Init) !void {
 // weakened in any way.
 // ---------------------------------------------------------------------------
 
-const test_msg_0041 = "input input8: Unknown key pressed, code: 0x0041";
-const test_msg_0042 = "input input8: Unknown key pressed, code: 0x0042";
+const SupportedTestCase = struct {
+    event: OemEvent,
+    message: []const u8,
+};
 
-test "admission: exact positive kernel/input records for both live codes" {
-    try std.testing.expect(isFnXRecord("kernel", "kernel", "input", "+input:input8", test_msg_0041));
-    try std.testing.expect(isFnXRecord("kernel", "kernel", "input", "+input:input8", test_msg_0042));
+const supported_test_cases = [_]SupportedTestCase{
+    .{ .event = .keyboard_backlight_off, .message = "input input8: Unknown key pressed, code: 0x0020" },
+    .{ .event = .keyboard_backlight_low, .message = "input input8: Unknown key pressed, code: 0x0021" },
+    .{ .event = .keyboard_backlight_high, .message = "input input8: Unknown key pressed, code: 0x0022" },
+    .{ .event = .touchpad_off, .message = "input input8: Unknown key pressed, code: 0x0030" },
+    .{ .event = .touchpad_on, .message = "input input8: Unknown key pressed, code: 0x0031" },
+    .{ .event = .mode_balanced, .message = "input input8: Unknown key pressed, code: 0x0041" },
+    .{ .event = .mode_performance, .message = "input input8: Unknown key pressed, code: 0x0042" },
+};
+
+const test_msg_0042 = supported_test_cases[6].message;
+
+test "admission: every supported code requires the exact kernel journal source" {
+    for (supported_test_cases) |case| {
+        try std.testing.expectEqual(case.event, eventForRecord("kernel", "kernel", "input", "+input:input8", case.message).?);
+        try std.testing.expect(isOemEventRecord("kernel", "kernel", "input", "+input:input8", case.message));
+        try std.testing.expectEqual(case.event, eventForSupportedRecord("+input:input8", "kernel", "kernel", "input", "+input:input8", case.message).?);
+
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("stdout", "kernel", "input", "+input:input8", case.message));
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "systemd-coredump", "input", "+input:input8", case.message));
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "block", "+input:input8", case.message));
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForSupportedRecord("+input:input5", "kernel", "kernel", "input", "+input:input8", case.message));
+
+        var mismatch_buffer: [128]u8 = undefined;
+        const mismatch = try std.fmt.bufPrint(&mismatch_buffer, "input input9{s}{s}", .{ UnknownKeyCodePrefix, case.event.scancode() });
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", mismatch));
+    }
 }
 
-test "mapping: 0x0041 is balanced and 0x0042 is performance" {
-    try std.testing.expectEqual(Mode.balanced, modeForRecord("kernel", "kernel", "input", "+input:input8", test_msg_0041).?);
-    try std.testing.expectEqual(Mode.performance, modeForRecord("kernel", "kernel", "input", "+input:input8", test_msg_0042).?);
+test "mapping: the seven admitted codes have exact typed semantics" {
+    try std.testing.expectEqual(@as(usize, 7), std.enums.values(OemEvent).len);
+    for (supported_test_cases) |case| {
+        try std.testing.expectEqual(case.event, eventForScancode(case.event.scancode()).?);
+        try std.testing.expectEqual(case.event, eventForMessage("+input:input8", case.message).?);
+    }
+    try std.testing.expectEqual(OemFeature.keyboard_backlight, OemEvent.keyboard_backlight_low.feature());
+    try std.testing.expectEqual(OemFeature.touchpad, OemEvent.touchpad_on.feature());
+    try std.testing.expectEqual(OemFeature.performance_mode, OemEvent.mode_balanced.feature());
 }
 
-test "admission: rejects non-kernel transport" {
-    try std.testing.expect(!isFnXRecord("stdout", "kernel", "input", "+input:input8", test_msg_0042));
+test "admission: unsupported request and donor codes remain rejected" {
+    const unsupported_codes = [_][]const u8{
+        "0x0040",
+        "0x0050",
+        "0x0051",
+        "0x00a0",
+        "0x00a1",
+        "0x00a2",
+        "0x00A0",
+        "0x00A1",
+        "0x00A2",
+    };
+    for (unsupported_codes) |code| {
+        var message_buffer: [128]u8 = undefined;
+        const message = try std.fmt.bufPrint(&message_buffer, "input input8{s}{s}", .{ UnknownKeyCodePrefix, code });
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForScancode(code));
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", message));
+    }
 }
 
-test "admission: rejects wrong syslog identifier" {
-    try std.testing.expect(!isFnXRecord("kernel", "systemd-coredump", "input", "+input:input8", test_msg_0042));
-}
-
-test "admission: rejects wrong kernel subsystem" {
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "block", "+input:input8", test_msg_0042));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "", "+input:input8", test_msg_0042));
-}
-
-test "admission: rejects wrong message" {
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x0043"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x00410"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x41"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "Unknown key pressed, code: 0x0042"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", test_msg_0042 ++ "\n"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", ""));
+test "admission: rejects malformed records and messages" {
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "", "+input:input8", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x0043"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x00410"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed, code: 0x42"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "Unknown key pressed, code: 0x0042"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input8: Unknown key pressed"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", test_msg_0042 ++ "\n"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", ""));
 }
 
 test "admission: message inputN must agree with kernel device" {
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input9: Unknown key pressed, code: 0x0042"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input80: Unknown key pressed, code: 0x0042"));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8", "input input08: Unknown key pressed, code: 0x0042"));
-}
-
-test "admission: production source must be the resolved huawei-wmi input" {
-    try std.testing.expectEqual(Mode.performance, modeForSupportedRecord("+input:input8", "kernel", "kernel", "input", "+input:input8", test_msg_0042).?);
-    try std.testing.expectEqual(@as(?Mode, null), modeForSupportedRecord("+input:input5", "kernel", "kernel", "input", "+input:input8", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input9: Unknown key pressed, code: 0x0042"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input80: Unknown key pressed, code: 0x0042"));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", "input input08: Unknown key pressed, code: 0x0042"));
 }
 
 test "admission: rejects missing or malformed kernel device" {
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "", test_msg_0042));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input", test_msg_0042));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input8x", test_msg_0042));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "+input:input-1", test_msg_0042));
-    try std.testing.expect(!isFnXRecord("kernel", "kernel", "input", "input8", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8x", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input-1", test_msg_0042));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "input8", test_msg_0042));
 }
 
 test "admission: dynamic inputN suffix is accepted, never hard-coded" {
@@ -736,14 +808,14 @@ test "admission: dynamic inputN suffix is accepted, never hard-coded" {
     try std.testing.expect(isInputDevicePath("+input:input8"));
     try std.testing.expect(isInputDevicePath("+input:input42"));
     try std.testing.expect(isInputDevicePath("+input:input12345"));
-    try std.testing.expect(isFnXRecord("kernel", "kernel", "input", "+input:input42", "input input42: Unknown key pressed, code: 0x0041"));
+    try std.testing.expectEqual(OemEvent.mode_balanced, eventForRecord("kernel", "kernel", "input", "+input:input42", "input input42: Unknown key pressed, code: 0x0041").?);
 }
 
 test "admission: oversized kernel-device identity is rejected by the pure seam" {
     const oversized = "+input:input123456789012345678901234567890123456789012345678901234567890";
     const message = "input input123456789012345678901234567890123456789012345678901234567890: Unknown key pressed, code: 0x0042";
     try std.testing.expect(oversized.len > MaxKernelDeviceLen);
-    try std.testing.expectEqual(@as(?Mode, null), modeForMessage(oversized, message));
+    try std.testing.expectEqual(@as(?OemEvent, null), eventForMessage(oversized, message));
 }
 
 test "fieldValue strips only FIELD= and preserves value bytes exactly" {
@@ -753,30 +825,41 @@ test "fieldValue strips only FIELD= and preserves value bytes exactly" {
     try std.testing.expectEqualStrings(test_msg_0042 ++ "\n", fieldValue("MESSAGE=" ++ test_msg_0042 ++ "\n"));
 }
 
-test "mapping: malformed or unsupported messages have no mode" {
-    try std.testing.expectEqual(@as(?Mode, null), modeForMessage("+input:input8", "input input8: Unknown key pressed, code: 0x0043"));
-    try std.testing.expectEqual(@as(?Mode, null), modeForMessage("+input:input9", test_msg_0041));
-    try std.testing.expectEqual(@as(?Mode, null), modeForRecord("stdout", "kernel", "input", "+input:input8", test_msg_0042));
+test "typed events expose exact stable tokens and scancodes" {
+    const expected_tokens = [_][]const u8{
+        "keyboard-backlight-off",
+        "keyboard-backlight-low",
+        "keyboard-backlight-high",
+        "touchpad-off",
+        "touchpad-on",
+        "balanced",
+        "performance",
+    };
+    for (supported_test_cases, expected_tokens) |case, token| {
+        try std.testing.expectEqualStrings(token, case.event.token());
+        try std.testing.expect(std.mem.endsWith(u8, case.message, case.event.scancode()));
+    }
 }
 
-test "labels are the exact IPC tokens" {
-    try std.testing.expectEqualStrings("performance", Mode.performance.label());
-    try std.testing.expectEqualStrings("balanced", Mode.balanced.label());
-    try std.testing.expectEqualStrings("0x0042", Mode.performance.scancode());
-    try std.testing.expectEqualStrings("0x0041", Mode.balanced.scancode());
-}
+test "debounce: only an identical semantic event inside 250 ms is suppressed" {
+    const window = 250 * std.time.ns_per_ms;
 
-test "debounce: same-mode duplicate is rejected but a distinct mode is admitted" {
-    var d = Debouncer{ .window_ns = 1_000_000_000 };
-    try std.testing.expect(d.accept(.balanced, 100));
-    try std.testing.expect(!d.accept(.balanced, 500)); // same mode inside window
-    try std.testing.expect(d.accept(.performance, 1_000)); // distinct state report
-    try std.testing.expect(!d.accept(.performance, 2_000));
-    try std.testing.expect(d.accept(.performance, 1_000_001_000)); // window elapsed
-    // a fresh debouncer accepts immediately
-    var d2 = Debouncer{ .window_ns = 0 };
-    try std.testing.expect(d2.accept(.balanced, 1));
-    try std.testing.expect(d2.accept(.balanced, 2));
+    var transition = Debouncer{ .window_ns = window };
+    try std.testing.expect(transition.accept(.keyboard_backlight_low, 0));
+    try std.testing.expect(transition.accept(.keyboard_backlight_high, 224 * std.time.ns_per_ms));
+
+    var duplicate = Debouncer{ .window_ns = window };
+    try std.testing.expect(duplicate.accept(.keyboard_backlight_low, 0));
+    try std.testing.expect(!duplicate.accept(.keyboard_backlight_low, 224 * std.time.ns_per_ms));
+    try std.testing.expect(duplicate.accept(.keyboard_backlight_low, 250 * std.time.ns_per_ms));
+
+    var cross_feature = Debouncer{ .window_ns = window };
+    try std.testing.expect(cross_feature.accept(.keyboard_backlight_low, 0));
+    try std.testing.expect(cross_feature.accept(.touchpad_off, std.time.ns_per_ms));
+
+    var no_window = Debouncer{ .window_ns = 0 };
+    try std.testing.expect(no_window.accept(.mode_balanced, 1));
+    try std.testing.expect(no_window.accept(.mode_balanced, 2));
 }
 
 test "debounce window conversion rejects overflow" {
@@ -877,14 +960,24 @@ test "ipc argv: exact zero-argument wrapper argv for noctalia-qs 0.0.12" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const argv = try ipcArgv(alloc, "/usr/bin/qs", "/opt/fnx-oem-osd/qml", Mode.performance);
+    const argv = try ipcArgv(alloc, "/usr/bin/qs", "/opt/fnx-oem-osd/qml", .mode_performance);
     defer alloc.free(argv);
     const expected = [_][]const u8{ "/usr/bin/qs", "-p", "/opt/fnx-oem-osd/qml", "ipc", "call", "fnx-oem-osd", "showPerformance" };
     try std.testing.expectEqual(expected.len, argv.len);
     for (expected, argv) |e, a| try std.testing.expectEqualStrings(e, a);
 }
 
-test "ipc argv: all modes map to their exact zero-argument wrapper" {
-    try std.testing.expectEqualStrings("showPerformance", ipcFunction(.performance));
-    try std.testing.expectEqualStrings("showBalanced", ipcFunction(.balanced));
+test "ipc argv: every supported event maps to its exact zero-argument wrapper" {
+    const expected_functions = [_][]const u8{
+        "showKeyboardOff",
+        "showKeyboardLow",
+        "showKeyboardHigh",
+        "showTouchpadOff",
+        "showTouchpadOn",
+        "showBalanced",
+        "showPerformance",
+    };
+    for (supported_test_cases, expected_functions) |case, function_name| {
+        try std.testing.expectEqualStrings(function_name, case.event.ipcFunction());
+    }
 }

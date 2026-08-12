@@ -5,7 +5,7 @@ pragma ComponentBehavior: Bound
 // Then:          qs -p <this-directory> ipc call fnx-oem-osd showPerformance
 // The OSD is display-only: no keyboard focus, no pointer capture, no
 // exclusive zone reservation. Display labels follow the system locale; IPC
-// mode tokens remain stable English identifiers.
+// event tokens remain stable English identifiers.
 
 import QtCore
 import QtQuick
@@ -19,8 +19,10 @@ PanelWindow {
     // How long a shown OSD stays fully visible (ms).
     property int hideAfterMs: 1500
     property int animationDuration: 150
-    property string currentMode: "unknown"
-    property string modeLabel: ""
+    property string currentEvent: "unknown"
+    property string currentFeature: "unknown"
+    property string featureLabel: "OEM"
+    property string eventLabel: ""
     property bool shouldBeVisible: false
     // The DMS files are optional inputs. Keeping complete local fallbacks means
     // this config remains usable as a standalone Quickshell package.
@@ -66,20 +68,22 @@ PanelWindow {
     readonly property color surfaceMutedColor: root.colorOrFallback("on_surface_variant")
     readonly property color outlineColor: root.colorOrFallback("outline_variant")
     readonly property color accentColor: {
-        switch (root.currentMode) {
+        switch (root.currentEvent) {
         case "performance":
             return root.colorOrFallback("primary_container");
         case "balanced":
+        case "touchpad-on":
             return root.colorOrFallback("tertiary_container");
         default:
             return root.colorOrFallback("secondary_container");
         }
     }
     readonly property color accentForegroundColor: {
-        switch (root.currentMode) {
+        switch (root.currentEvent) {
         case "performance":
             return root.colorOrFallback("on_primary_container");
         case "balanced":
+        case "touchpad-on":
             return root.colorOrFallback("on_tertiary_container");
         default:
             return root.colorOrFallback("on_secondary_container");
@@ -105,27 +109,94 @@ PanelWindow {
         return root.activeColors[name] || root.fallbackColors[name];
     }
 
-    function labelForMode(mode: string): string {
-        switch (mode) {
+    function isSupportedEvent(event: string): bool {
+        switch (event) {
+        case "performance":
+        case "balanced":
+        case "keyboard-backlight-off":
+        case "keyboard-backlight-low":
+        case "keyboard-backlight-high":
+        case "touchpad-off":
+        case "touchpad-on":
+        case "unknown":
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    function featureForEvent(event: string): string {
+        switch (event) {
+        case "performance":
+        case "balanced":
+            return "performance-mode";
+        case "keyboard-backlight-off":
+        case "keyboard-backlight-low":
+        case "keyboard-backlight-high":
+            return "keyboard-backlight";
+        case "touchpad-off":
+        case "touchpad-on":
+            return "touchpad";
+        default:
+            return "unknown";
+        }
+    }
+
+    function featureLabelForEvent(event: string): string {
+        switch (root.featureForEvent(event)) {
+        case "performance-mode":
+            return "Fn+X · OEM";
+        case "keyboard-backlight":
+            return root.useChinese ? "Fn+F8 · 鍵盤背光" : "Fn+F8 · Keyboard backlight";
+        case "touchpad":
+            return root.useChinese ? "Fn+F3 · 觸控板" : "Fn+F3 · Touchpad";
+        default:
+            return "OEM";
+        }
+    }
+
+    function labelForEvent(event: string): string {
+        switch (event) {
         case "performance":
             return root.useChinese ? "性能模式" : "Performance mode";
         case "balanced":
             return root.useChinese ? "均衡模式" : "Balanced mode";
+        case "keyboard-backlight-off":
+            return root.useChinese ? "鍵盤背光關閉" : "Backlight off";
+        case "keyboard-backlight-low":
+            return root.useChinese ? "鍵盤背光低亮度" : "Backlight low";
+        case "keyboard-backlight-high":
+            return root.useChinese ? "鍵盤背光高亮度" : "Backlight high";
+        case "touchpad-off":
+            return root.useChinese ? "觸控板關閉" : "Touchpad off";
+        case "touchpad-on":
+            return root.useChinese ? "觸控板開啟" : "Touchpad on";
         default:
             // Compatibility fallback for direct/manual IPC callers. The
-            // production listener maps both admitted scancodes to named modes.
-            return root.useChinese ? "OEM 模式已切換" : "OEM mode switched";
+            // production listener maps every admitted code to a named event.
+            return root.useChinese ? "OEM 狀態已切換" : "OEM state changed";
         }
     }
 
-    function barHeightFor(mode: string, index: int): real {
-        if (mode === "performance")
+    function barHeightFor(event: string, index: int): real {
+        if (event === "performance")
             return [8, 14, 20][index];
 
-        if (mode === "balanced")
+        if (event === "balanced")
             return [11, 17, 11][index];
 
         return 5;
+    }
+
+    function keyboardGlowWidthFor(event: string): real {
+        switch (event) {
+        case "keyboard-backlight-low":
+            return 10;
+        case "keyboard-backlight-high":
+            return 20;
+        default:
+            return 0;
+        }
     }
 
     function parseMatugen(content: string) {
@@ -161,13 +232,15 @@ PanelWindow {
         }
     }
 
-    function showMode(mode: string): string {
-        if (mode !== "performance" && mode !== "balanced" && mode !== "unknown") {
-            console.warn(`fnx-oem-osd: rejected mode '${mode}'`);
-            return "FNX_OSD_SHOW_REJECTED_INVALID_MODE";
+    function showEvent(event: string): string {
+        if (!root.isSupportedEvent(event)) {
+            console.warn(`fnx-oem-osd: rejected event '${event}'`);
+            return "FNX_OSD_SHOW_REJECTED_INVALID_EVENT";
         }
-        root.currentMode = mode;
-        root.modeLabel = root.labelForMode(mode);
+        root.currentEvent = event;
+        root.currentFeature = root.featureForEvent(event);
+        root.featureLabel = root.featureLabelForEvent(event);
+        root.eventLabel = root.labelForEvent(event);
         closeTimer.stop();
         root.visible = true;
         root.shouldBeVisible = true;
@@ -190,22 +263,42 @@ PanelWindow {
 
     IpcHandler {
         function show(mode: string): string {
-            return root.showMode(mode);
+            return root.showEvent(mode);
         }
 
         // noctalia-qs 0.0.12 rejects arguments on the new `ipc call` CLI.
         // These wrappers keep the typed central handler while providing a
         // zero-argument production path that works with `ipc call`.
         function showPerformance(): string {
-            return root.showMode("performance");
+            return root.showEvent("performance");
         }
 
         function showBalanced(): string {
-            return root.showMode("balanced");
+            return root.showEvent("balanced");
+        }
+
+        function showKeyboardOff(): string {
+            return root.showEvent("keyboard-backlight-off");
+        }
+
+        function showKeyboardLow(): string {
+            return root.showEvent("keyboard-backlight-low");
+        }
+
+        function showKeyboardHigh(): string {
+            return root.showEvent("keyboard-backlight-high");
+        }
+
+        function showTouchpadOff(): string {
+            return root.showEvent("touchpad-off");
+        }
+
+        function showTouchpadOn(): string {
+            return root.showEvent("touchpad-on");
         }
 
         function showUnknown(): string {
-            return root.showMode("unknown");
+            return root.showEvent("unknown");
         }
 
         target: "fnx-oem-osd"
@@ -306,12 +399,17 @@ PanelWindow {
 
                 Item {
                     anchors.centerIn: parent
-                    width: 19
+                    width: 24
                     height: 22
 
                     Row {
-                        anchors.fill: parent
+                        id: modeIcon
+
+                        x: 2
+                        width: 19
+                        height: parent.height
                         spacing: 3
+                        visible: root.currentFeature === "performance-mode"
 
                         Repeater {
                             model: 3
@@ -321,7 +419,7 @@ PanelWindow {
 
                                 y: parent.height - height
                                 width: 4
-                                height: root.barHeightFor(root.currentMode, index)
+                                height: root.barHeightFor(root.currentEvent, index)
                                 radius: 2
                                 color: root.accentForegroundColor
 
@@ -332,6 +430,92 @@ PanelWindow {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    Item {
+                        id: keyboardIcon
+
+                        anchors.fill: parent
+                        visible: root.currentFeature === "keyboard-backlight"
+
+                        Rectangle {
+                            x: 1
+                            y: 3
+                            width: 22
+                            height: 14
+                            radius: 3
+                            color: "transparent"
+                            border.color: root.accentForegroundColor
+                            border.width: 2
+                        }
+
+                        Row {
+                            x: 5
+                            y: 7
+                            spacing: 2
+
+                            Repeater {
+                                model: 4
+
+                                Rectangle {
+                                    width: 2
+                                    height: 3
+                                    radius: 1
+                                    color: root.accentForegroundColor
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 20
+                            width: root.keyboardGlowWidthFor(root.currentEvent)
+                            height: 2
+                            radius: 1
+                            color: root.accentForegroundColor
+
+                            Behavior on width {
+                                NumberAnimation {
+                                    duration: root.animationDuration
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                        }
+                    }
+
+                    Item {
+                        id: touchpadIcon
+
+                        anchors.centerIn: parent
+                        width: 19
+                        height: 22
+                        visible: root.currentFeature === "touchpad"
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 3
+                            color: "transparent"
+                            border.color: root.accentForegroundColor
+                            border.width: 2
+                        }
+
+                        Rectangle {
+                            x: 3
+                            y: 15
+                            width: 13
+                            height: 1
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 2
+                            height: 25
+                            radius: 1
+                            rotation: -42
+                            color: root.accentForegroundColor
+                            visible: root.currentEvent === "touchpad-off"
                         }
                     }
                 }
@@ -348,7 +532,7 @@ PanelWindow {
                 spacing: 1
 
                 Text {
-                    text: "Fn+X · OEM"
+                    text: root.featureLabel
                     color: root.surfaceMutedColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(11 * root.themeFontScale)
@@ -357,7 +541,7 @@ PanelWindow {
                 }
 
                 Text {
-                    text: root.modeLabel
+                    text: root.eventLabel
                     color: root.surfaceForegroundColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(17 * root.themeFontScale)

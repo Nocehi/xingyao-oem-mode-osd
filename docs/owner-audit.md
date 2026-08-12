@@ -26,10 +26,10 @@ the hardware gate.
 
 `--check-support` verifies only the identity above. `--check-runtime` also
 checks that this user can see kernel journal entries and that the strict
-journal filters can be installed. Neither command presses Fn+X, reads SMU
-limits, calls Quickshell IPC, or proves visible compositor presentation.
-Both are read-only, host-dependent preflights and are excluded from the
-canonical hardware-free gate.
+journal filters can be installed. Neither command triggers an OEM key, changes
+hardware state, calls Quickshell IPC, or proves visible compositor
+presentation. Both are read-only, host-dependent preflights and are excluded
+from the canonical hardware-free gate.
 
 ## Evidence classes
 
@@ -42,12 +42,17 @@ canonical hardware-free gate.
 | QML syntax and static bindings | canonical `qmlformat` plus warning-gated `qmllint`; a fail-closed validator accepts only status 0 with no output or status 255 with the exact known `PanelWindow` metadata diagnostic | no Wayland surface or visual proof |
 | QML IPC round-trip | optional `tests/live-qml-smoke.sh` in a real session | handler/process proof; visible presentation still requires observation |
 | P916F-STX A -> B -> A power mapping | `evidence/p916f-stx-calibration-v1.json` | author-transcribed summary; raw captures are absent |
-| physical overlay | original author's report in `README.md` | not reproducible from this repository |
+| Fn+F8 `0x0021 -> 0x0022 -> 0x0020` and physical backlight switching | original operator's dated report in `README.md`; static AML/OEM OSD analysis is not shipped | same-board operator observation, not independently reproducible raw evidence |
+| Fn+F3 `0x0030 -> 0x0031`, TPST off/on semantics, and live A -> B -> A touch effect | dated operator/observer report in `README.md`; static AML/OEM OSD analysis and raw live transcripts are not shipped | same-board live evidence establishes suppression/restoration before libinput-visible events while the device node persists; exact internal mechanism remains unresolved |
+| physical overlay | dated v0.2.0 and eight-state v0.3.0-dev author-host reports in `README.md`; optional `tests/live-qml-smoke.sh` supplies the IPC/process half | operator-confirmed text/icons and pointer pass-through on the author session; not an automated visual assertion or another compositor/output proof |
 
 The canonical gate parses the calibration JSON and binds its DMI/WMI constants,
-mapping order, all three timestamp/scancode/mode/power samples, controlled Linux
-state, audit context, and limitation text. This detects documentation/code drift;
-it does not upgrade the transcribed values into raw evidence.
+power-mode mapping order, all three timestamp/scancode/mode/power samples,
+controlled Linux state, audit context, and limitation text. This detects
+documentation/code drift; it does not upgrade the transcribed values into raw
+evidence. The additional Fn+F8/Fn+F3 and physical-presentation observations
+remain explicitly operator-transcribed rather than being folded into that
+power-calibration JSON.
 
 ## Audited assumptions
 
@@ -72,13 +77,30 @@ it does not upgrade the transcribed values into raw evidence.
 5. The power values in the JSON are a transcription of an operator-correlated
    run. The repository does not contain raw journal export, RyzenAdj output,
    command transcript, hashes, or an independent observer record.
-6. The statement that the driver logs these codes without a usable evdev event
-   is an original-host observation. The listener does not attempt an evdev,
-   hwdb, keyd, or injection fallback.
-7. A same-mode record within 250 ms is a duplicate; a different calibrated
-   mode inside that window is admitted. The default interval is tested as code
-   behavior but has not been independently calibrated as a universal firmware
-   duplicate interval.
+6. On the same strict P916F-STX journal source, the operator observed Fn+F8
+   `0x0021 -> 0x0022 -> 0x0020` plus physical keyboard-backlight switching, and
+   Fn+F3 `0x0030 -> 0x0031`. Static current-board AML and exact OEM OSD analysis
+   bind these codes to keyboard low/high/off and touchpad off/on respectively.
+   Those source artifacts and raw journal exports are not shipped here.
+7. On 2026-08-13, a separate live Fn+F3 A -> B -> A observation established the
+   Linux touch effect. `0x0030` was followed by a successful non-grabbing open
+   of the still-present touchpad event node but zero pointer/gesture events
+   during deliberate finger movement and no cursor motion. The next press
+   emitted exactly one `0x0031`; a fresh observer then received
+   `GESTURE_HOLD_BEGIN` and hundreds of `POINTER_MOTION` events over about 4.2
+   seconds while cursor motion returned. This establishes suppression and
+   restoration before libinput-visible event generation, not the exact EC,
+   firmware, or device-internal mechanism. The OSD performs no touchpad action.
+8. The statement that Fn+X is logged without a usable evdev event is an
+   original-host observation. The listener does not attempt an evdev, hwdb,
+   keyd, or injection fallback for any feature.
+9. An identical semantic event within 250 ms is a duplicate; a distinct state
+   or feature inside that window is admitted. The 224 ms keyboard low-to-high
+   regression is covered deterministically. The interval itself has not been
+   independently calibrated as a universal firmware duplicate interval.
+10. Airplane `0x00a0`, microphone `0x00a1`, and combined-SKU donor `0x0040`,
+    `0x0050`, `0x0051`, and `0x00a2` are not admitted. The first two are
+    Windows-userspace request events, not safe display-only state reports.
 
 ### Journal and listener runtime
 
@@ -87,8 +109,8 @@ it does not upgrade the transcribed values into raw evidence.
    explicitly and exits 78 when kernel visibility is absent.
 2. Kernel events are written to the default local system journal namespace.
    Remote journals, alternate namespaces, and user-only journals are excluded.
-3. Startup intentionally seeks to the tail. Fn+X records written before the
-   listener starts are not replayed, and no current OEM mode is seeded.
+3. Startup intentionally seeks to the tail. Supported OEM records written
+   before the listener starts are not replayed, and no current state is seeded.
 4. The resolved `inputN` is assumed stable for one listener process lifetime.
    A driver unbind/rebind or device re-enumeration that changes it requires a
    listener restart; the old strict journal match will not follow a new number.
@@ -104,8 +126,10 @@ it does not upgrade the transcribed values into raw evidence.
 ### Quickshell and session runtime
 
 1. `qs` is Quickshell-compatible and supports `-p PATH ipc call TARGET
-   FUNCTION`. The zero-argument wrappers were observed with noctalia-qs 0.0.12;
-   a CLI/IPC compatibility change requires revalidation.
+   FUNCTION`. Every production event has a zero-argument wrapper; the existing
+   `showPerformance` and `showBalanced` names remain compatible. This transport
+   was observed with noctalia-qs 0.0.12; a CLI/IPC compatibility change requires
+   revalidation.
 2. The systemd user manager has the correct Wayland/session environment when
    the OSD starts. Unit syntax cannot prove `WAYLAND_DISPLAY`, compositor
    readiness, output choice, or layer-shell presentation.
@@ -117,17 +141,24 @@ it does not upgrade the transcribed values into raw evidence.
    logged without retry.
 5. DMS palette/settings/session files are optional. Without a valid DMS session
    file the standalone fallback is dark; the included light fallback becomes
-   selected only when `isLightMode` is supplied.
+   selected only when `isLightMode` is supplied. The standalone panel has no
+   screen-edge anchors and is centered by the supported layer-shell path. It
+   does not consume DMS `osdPosition`, which controls DMS's separate `DankOSD`.
 6. Locale and multi-output behavior are Qt/Quickshell-derived. Static checks
    cover labels and bindings, not which physical output presents the window.
-7. A clean OSD process exit is not restarted by `Restart=on-failure`; a crash
+7. On 2026-08-13, the original operator observed a paced source-tree smoke of
+   all seven production wrappers plus `showUnknown`. Every IPC call returned
+   `FNX_OSD_SHOW_OK`; all eight text/icon states were visually confirmed and
+   pointer input passed through. This is author-host presentation evidence, not
+   an automated visual assertion or another compositor/output proof.
+8. A clean OSD process exit is not restarted by `Restart=on-failure`; a crash
    is. Unsupported hardware and missing journal permission are restart-loop
    protected by exit statuses 77 and 78.
-8. `qs` and `/usr/bin/env` are checked and recorded by canonical path at install
+9. `qs` and `/usr/bin/env` are checked and recorded by canonical path at install
    time but are external dependencies, not copied or content-hashed into the
    release. Replacing either executable can change runtime behavior without a
    repository update.
-9. `Wants=` starts the OSD before the listener preflight. If the listener then
+10. `Wants=` starts the OSD before the listener preflight. If the listener then
    exits 77 or 78, the inert OSD process can remain running until it is stopped
    or the graphical session ends; it cannot admit hardware events itself.
 
@@ -230,8 +261,9 @@ from similarity alone. A proposal needs, at minimum:
 1. exact DMI vendor/board identity and BIOS/firmware version;
 2. complete WMI UUIDs and the bound platform/input topology;
 3. raw verbose journal records for every proposed scancode;
-4. an operator-labelled A -> B -> A sequence with controlled Linux power state;
-5. immediate independent OEM-limit readback for every press;
+4. an operator-labelled state sequence with controlled relevant Linux state;
+5. immediate independent state readback or physical observation appropriate to
+   the proposed feature for every press;
 6. a physical IPC/overlay smoke that keeps accepted IPC separate from visible
    presentation; and
 7. a new evidence artifact, parser/source-gate tests, and an explicit review of

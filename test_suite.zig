@@ -62,10 +62,10 @@ test "calibration evidence: JSON is parseable and bound to code constants" {
     try std.testing.expectEqualStrings("Read-only author-host observation made after the calibration date; not a raw calibration capture.", evidence.audit_identity_observation.scope);
 
     try std.testing.expectEqual(@as(usize, 2), evidence.mappings.len);
-    try std.testing.expectEqualStrings(listener.Mode.balanced.scancode(), evidence.mappings[0].scancode);
-    try std.testing.expectEqualStrings(listener.Mode.balanced.label(), evidence.mappings[0].mode);
-    try std.testing.expectEqualStrings(listener.Mode.performance.scancode(), evidence.mappings[1].scancode);
-    try std.testing.expectEqualStrings(listener.Mode.performance.label(), evidence.mappings[1].mode);
+    try std.testing.expectEqualStrings(listener.OemEvent.mode_balanced.scancode(), evidence.mappings[0].scancode);
+    try std.testing.expectEqualStrings(listener.OemEvent.mode_balanced.token(), evidence.mappings[0].mode);
+    try std.testing.expectEqualStrings(listener.OemEvent.mode_performance.scancode(), evidence.mappings[1].scancode);
+    try std.testing.expectEqualStrings(listener.OemEvent.mode_performance.token(), evidence.mappings[1].mode);
 
     try std.testing.expectEqual(@as(usize, 3), evidence.calibration_samples.len);
     const expected_times = [_][]const u8{
@@ -95,4 +95,16 @@ test "calibration evidence: JSON is parseable and bound to code constants" {
     try std.testing.expectEqualStrings("Values are transcribed from the original author's local run; raw journal and RyzenAdj captures are not shipped in this repository.", evidence.limitations[0]);
     try std.testing.expectEqualStrings("The summary does not establish compatibility for another model, board identity, BIOS, WMI path, or scancode mapping.", evidence.limitations[1]);
     try std.testing.expectEqualStrings("A successful IPC response does not prove visible compositor presentation.", evidence.limitations[2]);
+}
+
+test "QML exposes every typed event through a zero-argument wrapper" {
+    const qml = @embedFile("qml/shell.qml");
+    for (std.enums.values(listener.OemEvent)) |event| {
+        const signature = try std.fmt.allocPrint(std.testing.allocator, "function {s}(): string", .{event.ipcFunction()});
+        const present = std.mem.indexOf(u8, qml, signature) != null;
+        std.testing.allocator.free(signature);
+        try std.testing.expect(present);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, qml, "WlrLayershell.keyboardFocus: WlrKeyboardFocus.None") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qml, "mask: Region {}") != null);
 }
