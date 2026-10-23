@@ -355,6 +355,12 @@ round-trip through the listener actions has not yet been observed.
 See [`docs/owner-audit.md`](docs/owner-audit.md) for the complete assumption,
 failure-mode, evidence-class, and future revalidation ledger.
 
+## Out of scope
+
+Display brightness is not handled here. DankMaterialShell already reads the
+standard brightness keys and shows its own OSD, so this project adds no
+brightness listener or wrapper.
+
 ## Limitations and revalidation boundary
 
 Revalidate after a BIOS/firmware, board, kernel driver, journal record shape,
