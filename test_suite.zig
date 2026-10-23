@@ -97,10 +97,16 @@ test "calibration evidence: JSON is parseable and bound to code constants" {
     try std.testing.expectEqualStrings("A successful IPC response does not prove visible compositor presentation.", evidence.limitations[2]);
 }
 
-test "QML exposes every typed event through a zero-argument wrapper" {
+test "QML exposes every typed event and request outcome through a zero-argument wrapper" {
     const qml = @embedFile("qml/shell.qml");
     for (std.enums.values(listener.OemEvent)) |event| {
         const signature = try std.fmt.allocPrint(std.testing.allocator, "function {s}(): string", .{event.ipcFunction()});
+        const present = std.mem.indexOf(u8, qml, signature) != null;
+        std.testing.allocator.free(signature);
+        try std.testing.expect(present);
+    }
+    for (std.enums.values(listener.RequestOutcome)) |outcome| {
+        const signature = try std.fmt.allocPrint(std.testing.allocator, "function {s}(): string", .{outcome.ipcFunction()});
         const present = std.mem.indexOf(u8, qml, signature) != null;
         std.testing.allocator.free(signature);
         try std.testing.expect(present);

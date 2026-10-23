@@ -14,15 +14,21 @@
 //!   * Strict admission: kernel transport + kernel identifier + input
 //!     subsystem + the dynamically resolved `Huawei WMI hotkeys` input device
 //!     + exact message whose `inputN` agrees with that device and whose code is
-//!     one of the seven display-only codes calibrated on this board. The `N`
-//!     in `inputN` is never hard-coded.
+//!     one of the seven display-only codes calibrated on this board, or one of
+//!     the two OEM request codes below. The `N` in `inputN` is never
+//!     hard-coded.
 //!   * Fail-closed hardware preflight for the calibrated P916F-STX DMI, WMI
 //!     GUID pair, huawei-wmi platform path, and input-device identity.
 //!   * Exact-event monotonic debounce against duplicate WMI notifications.
 //!   * Each admitted scancode maps directly to a typed state already formed by
 //!     firmware/EC: keyboard backlight off/low/high, touchpad off/on, or OEM
-//!     balanced/performance mode. The listener has no seed or toggle state and
-//!     never performs the hardware action.
+//!     balanced/performance mode. For those codes the listener has no seed or
+//!     toggle state and never performs the hardware action.
+//!   * Two request codes (Fn+F7 microphone, Fn+F9 airplane mode) are not
+//!     acted on by firmware; on Windows the OEM service performs the action.
+//!     The listener performs the equivalent Linux action (PipeWire default
+//!     source mute through `wpctl`, global rfkill through `/dev/rfkill`) and
+//!     displays only the state read back afterwards, never a guessed state.
 //!   * Quickshell IPC is invoked without a shell (argv-only) and its exit
 //!     status is checked; a failure is reported, never claimed as shown.
 
@@ -155,6 +161,78 @@ pub const OemEvent = enum {
 };
 
 // ---------------------------------------------------------------------------
+// OEM request keys. Firmware forms no state for these codes; the listener
+// performs the Linux action and displays only the state read back afterwards.
+// ---------------------------------------------------------------------------
+
+pub const OemRequest = enum {
+    microphone_toggle,
+    airplane_toggle,
+
+    pub fn token(request: OemRequest) []const u8 {
+        return switch (request) {
+            .microphone_toggle => "microphone-toggle",
+            .airplane_toggle => "airplane-toggle",
+        };
+    }
+
+    pub fn scancode(request: OemRequest) []const u8 {
+        return switch (request) {
+            .microphone_toggle => "0x00a1",
+            .airplane_toggle => "0x00a0",
+        };
+    }
+};
+
+/// The state read back after a request action. Only this read-back state is
+/// ever displayed.
+pub const RequestOutcome = enum {
+    microphone_muted,
+    microphone_on,
+    airplane_on,
+    airplane_off,
+
+    pub fn token(outcome: RequestOutcome) []const u8 {
+        return switch (outcome) {
+            .microphone_muted => "microphone-muted",
+            .microphone_on => "microphone-on",
+            .airplane_on => "airplane-on",
+            .airplane_off => "airplane-off",
+        };
+    }
+
+    pub fn ipcFunction(outcome: RequestOutcome) []const u8 {
+        return switch (outcome) {
+            .microphone_muted => "showMicMuted",
+            .microphone_on => "showMicOn",
+            .airplane_on => "showAirplaneOn",
+            .airplane_off => "showAirplaneOff",
+        };
+    }
+};
+
+/// An admitted journal record is either a firmware-formed display event or a
+/// request the listener must act on.
+pub const Admitted = union(enum) {
+    display: OemEvent,
+    request: OemRequest,
+
+    pub fn token(admitted: Admitted) []const u8 {
+        return switch (admitted) {
+            .display => |event| event.token(),
+            .request => |request| request.token(),
+        };
+    }
+
+    pub fn scancode(admitted: Admitted) []const u8 {
+        return switch (admitted) {
+            .display => |event| event.scancode(),
+            .request => |request| request.scancode(),
+        };
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Strict journal admission.
 // ---------------------------------------------------------------------------
 
@@ -177,10 +255,10 @@ pub fn isOemEventRecord(transport: []const u8, syslog_identifier: []const u8, ke
     return eventForRecord(transport, syslog_identifier, kernel_subsystem, kernel_device, message) != null;
 }
 
-/// Accepts only the seven current-board display-only codes. The `inputN` in
+/// Returns the exact scancode text of a well-formed record. The `inputN` in
 /// MESSAGE must be identical to `_KERNEL_DEVICE=+input:inputN`; this preserves
 /// strict admission without hard-coding the current dynamic input number.
-pub fn eventForMessage(kernel_device: []const u8, message: []const u8) ?OemEvent {
+pub fn scancodeForMessage(kernel_device: []const u8, message: []const u8) ?[]const u8 {
     if (kernel_device.len > MaxKernelDeviceLen) return null;
     if (!isInputDevicePath(kernel_device)) return null;
     if (!std.mem.startsWith(u8, message, MessageDevicePrefix)) return null;
@@ -191,7 +269,34 @@ pub fn eventForMessage(kernel_device: []const u8, message: []const u8) ?OemEvent
 
     const suffix = after_prefix[input_name.len..];
     if (!std.mem.startsWith(u8, suffix, UnknownKeyCodePrefix)) return null;
-    return eventForScancode(suffix[UnknownKeyCodePrefix.len..]);
+    return suffix[UnknownKeyCodePrefix.len..];
+}
+
+/// Accepts only the seven current-board display-only codes.
+pub fn eventForMessage(kernel_device: []const u8, message: []const u8) ?OemEvent {
+    return eventForScancode(scancodeForMessage(kernel_device, message) orelse return null);
+}
+
+/// Accepts the seven display-only codes and the two request codes.
+pub fn admittedForMessage(kernel_device: []const u8, message: []const u8) ?Admitted {
+    const code = scancodeForMessage(kernel_device, message) orelse return null;
+    if (eventForScancode(code)) |event| return .{ .display = event };
+    if (requestForScancode(code)) |request| return .{ .request = request };
+    return null;
+}
+
+pub fn admittedForRecord(transport: []const u8, syslog_identifier: []const u8, kernel_subsystem: []const u8, kernel_device: []const u8, message: []const u8) ?Admitted {
+    if (!std.mem.eql(u8, transport, "kernel")) return null;
+    if (!std.mem.eql(u8, syslog_identifier, "kernel")) return null;
+    if (!std.mem.eql(u8, kernel_subsystem, "input")) return null;
+    return admittedForMessage(kernel_device, message);
+}
+
+pub fn requestForScancode(scancode: []const u8) ?OemRequest {
+    inline for (std.enums.values(OemRequest)) |request| {
+        if (std.mem.eql(u8, scancode, request.scancode())) return request;
+    }
+    return null;
 }
 
 pub fn eventForScancode(scancode: []const u8) ?OemEvent {
@@ -370,22 +475,28 @@ fn supportFailureHint(err: anyerror) []const u8 {
 // Monotonic debounce.
 // ---------------------------------------------------------------------------
 
-pub const Debouncer = struct {
-    window_ns: u64,
-    last_accept_ns: ?u64 = null,
-    last_event: ?OemEvent = null,
+pub fn Debouncer(comptime Key: type) type {
+    return struct {
+        window_ns: u64,
+        last_accept_ns: ?u64 = null,
+        last_key: ?Key = null,
 
-    /// Rejects only an identical semantic event inside the window. A distinct
-    /// state or feature is a new report and must not be dropped.
-    pub fn accept(self: *Debouncer, event: OemEvent, now_ns: u64) bool {
-        if (self.last_accept_ns) |t| {
-            if (self.last_event == event and now_ns -| t < self.window_ns) return false;
+        /// Rejects only an identical semantic event inside the window. A
+        /// distinct state or feature is a new report and must not be dropped.
+        /// For a request this also prevents a duplicate WMI notification from
+        /// toggling the state twice.
+        pub fn accept(self: *@This(), key: Key, now_ns: u64) bool {
+            if (self.last_accept_ns) |t| {
+                if (self.last_key) |last| {
+                    if (std.meta.eql(last, key) and now_ns -| t < self.window_ns) return false;
+                }
+            }
+            self.last_accept_ns = now_ns;
+            self.last_key = key;
+            return true;
         }
-        self.last_accept_ns = now_ns;
-        self.last_event = event;
-        return true;
-    }
-};
+    };
+}
 
 fn monotonicNanos() ?u64 {
     var ts: jl.struct_timespec = undefined;
@@ -410,7 +521,7 @@ pub fn debounceWindowNanos(milliseconds: u64) !u64 {
 /// (exit 109), although its deprecated `msg` path accepts them. Zero-argument
 /// wrappers retain the supported `ipc call` transport without relying on that
 /// deprecated fallback.
-pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const u8, event: OemEvent) ![][]const u8 {
+pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const u8, function_name: []const u8) ![][]const u8 {
     return alloc.dupe([]const u8, &.{
         qs_bin,
         "-p",
@@ -418,8 +529,127 @@ pub fn ipcArgv(alloc: std.mem.Allocator, qs_bin: []const u8, qml_config: []const
         "ipc",
         "call",
         "fnx-oem-osd",
-        event.ipcFunction(),
+        function_name,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Request actions. The pure parsing/decision functions are the test seam; the
+// thin process and device wrappers perform the action.
+// ---------------------------------------------------------------------------
+
+pub const WpctlDefaultSource = "@DEFAULT_AUDIO_SOURCE@";
+
+/// Parses `wpctl get-volume` output, for example `Volume: 1.00 [MUTED]`.
+/// Anything other than one recognised line is not a readable state.
+pub fn micMutedFromWpctl(output: []const u8) ?bool {
+    const line = std.mem.trim(u8, output, " \t\r\n");
+    if (!std.mem.startsWith(u8, line, "Volume: ")) return null;
+    if (std.mem.indexOfAny(u8, line, "\r\n") != null) return null;
+    return std.mem.endsWith(u8, line, " [MUTED]");
+}
+
+pub const RadioSummary = struct {
+    total: usize = 0,
+    /// Radios with neither a soft nor a hard block.
+    enabled: usize = 0,
+};
+
+const RfkillClassPath = "sys/class/rfkill";
+
+fn readBlockFlag(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, device: []const u8, attribute: []const u8) !bool {
+    const path = try std.fmt.allocPrint(alloc, "{s}/{s}/{s}", .{ RfkillClassPath, device, attribute });
+    defer alloc.free(path);
+    const value = try readSysfsValue(alloc, io, root, path);
+    defer alloc.free(value);
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "1")) return true;
+    return error.MalformedRfkillState;
+}
+
+/// Reads every `rfkillN` switch below a filesystem root. Production passes
+/// `/`; tests pass a fixture root.
+pub fn readRadioSummary(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !RadioSummary {
+    var summary = RadioSummary{};
+    var class_dir = root.openDir(io, RfkillClassPath, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return summary,
+        else => return err,
+    };
+    defer class_dir.close(io);
+    var iterator = class_dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "rfkill")) continue;
+        const soft = try readBlockFlag(alloc, io, root, entry.name, "soft");
+        const hard = try readBlockFlag(alloc, io, root, entry.name, "hard");
+        summary.total += 1;
+        if (!soft and !hard) summary.enabled += 1;
+    }
+    return summary;
+}
+
+/// Windows-like airplane toggle: while any radio is enabled, block all;
+/// otherwise unblock all. Returns the soft-block target, or null without radios.
+pub fn airplaneBlockTarget(summary: RadioSummary) ?bool {
+    if (summary.total == 0) return null;
+    return summary.enabled > 0;
+}
+
+/// Airplane mode is on exactly when no radio is enabled.
+pub fn airplaneOutcome(summary: RadioSummary) ?RequestOutcome {
+    if (summary.total == 0) return null;
+    return if (summary.enabled == 0) .airplane_on else .airplane_off;
+}
+
+/// `struct rfkill_event` (RFKILL_EVENT_SIZE_V1, linux/rfkill.h): idx u32,
+/// type u8, op u8, soft u8, hard u8. RFKILL_TYPE_ALL is 0 and
+/// RFKILL_OP_CHANGE_ALL is 3.
+pub fn rfkillChangeAllEvent(block: bool) [8]u8 {
+    return .{ 0, 0, 0, 0, 0, 3, @intFromBool(block), 0 };
+}
+
+fn writeRfkillChangeAll(block: bool) !void {
+    const linux = std.os.linux;
+    const open_rc = linux.open("/dev/rfkill", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(open_rc) != .SUCCESS) return error.RfkillOpenFailed;
+    const fd: i32 = @intCast(open_rc);
+    defer _ = linux.close(fd);
+    const event = rfkillChangeAllEvent(block);
+    const write_rc = linux.write(fd, &event, event.len);
+    if (linux.errno(write_rc) != .SUCCESS or write_rc != event.len) return error.RfkillWriteFailed;
+}
+
+/// Runs a tool without a shell and returns its stdout on exit 0.
+fn runTool(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
+    const res = try std.process.run(gpa, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(16 * 1024),
+        .stderr_limit = .limited(16 * 1024),
+    });
+    defer gpa.free(res.stderr);
+    switch (res.term) {
+        .exited => |code| if (code == 0) return res.stdout,
+        else => {},
+    }
+    gpa.free(res.stdout);
+    std.debug.print("fnx-oem-osd-listener: {s} {s} failed ({s}). stderr: {s}\n", .{ argv[0], argv[1], @tagName(res.term), std.mem.trim(u8, res.stderr, " \t\r\n") });
+    return error.ToolFailed;
+}
+
+fn performRequest(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, wpctl_bin: []const u8, request: OemRequest) !RequestOutcome {
+    switch (request) {
+        .microphone_toggle => {
+            gpa.free(try runTool(gpa, io, &.{ wpctl_bin, "set-mute", WpctlDefaultSource, "toggle" }));
+            const output = try runTool(gpa, io, &.{ wpctl_bin, "get-volume", WpctlDefaultSource });
+            defer gpa.free(output);
+            const muted = micMutedFromWpctl(output) orelse return error.UnrecognizedWpctlOutput;
+            return if (muted) .microphone_muted else .microphone_on;
+        },
+        .airplane_toggle => {
+            const block = airplaneBlockTarget(try readRadioSummary(gpa, io, root)) orelse return error.NoRadios;
+            try writeRfkillChangeAll(block);
+            return airplaneOutcome(try readRadioSummary(gpa, io, root)) orelse error.NoRadios;
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +673,7 @@ fn fieldEquals(j: *jl.sd_journal, field: [:0]const u8, expected: []const u8) boo
     return std.mem.eql(u8, value, expected);
 }
 
-fn currentRecordEvent(j: *jl.sd_journal, expected_kernel_device: []const u8) ?OemEvent {
+fn currentRecordAdmission(j: *jl.sd_journal, expected_kernel_device: []const u8) ?Admitted {
     // libsystemd only guarantees a value returned by sd_journal_get_data()
     // until the next get-data call. Consume each value before requesting the
     // next field instead of retaining borrowed slices in a JournalEntry.
@@ -464,7 +694,7 @@ fn currentRecordEvent(j: *jl.sd_journal, expected_kernel_device: []const u8) ?Oe
     const device = device_buffer[0..borrowed_device.len];
 
     const message = readField(j, "MESSAGE") orelse return null;
-    return eventForMessage(device, message);
+    return admittedForMessage(device, message);
 }
 
 fn addJournalMatch(j: *jl.sd_journal, match: []const u8) bool {
@@ -504,8 +734,8 @@ fn addProductionJournalMatches(alloc: std.mem.Allocator, j: *jl.sd_journal, kern
     }
 }
 
-fn spawnIpc(gpa: std.mem.Allocator, io: std.Io, qs_bin: []const u8, qml_config: []const u8, event: OemEvent) !void {
-    const argv = try ipcArgv(gpa, qs_bin, qml_config, event);
+fn spawnIpc(gpa: std.mem.Allocator, io: std.Io, qs_bin: []const u8, qml_config: []const u8, function_name: []const u8) !void {
+    const argv = try ipcArgv(gpa, qs_bin, qml_config, function_name);
     defer gpa.free(argv);
     const res = try std.process.run(gpa, io, .{
         .argv = argv,
@@ -534,8 +764,9 @@ fn usage() void {
 
 const usage_text = std.fmt.comptimePrint(
     \\fnx-oem-osd-listener {s}
-    \\Observes the systemd journal for supported P916F-STX display-only OEM-key
-    \\notifications and drives the standalone Quickshell OSD via IPC.
+    \\Observes the systemd journal for supported P916F-STX OEM-key notifications
+    \\and drives the standalone Quickshell OSD via IPC. Fn+F7 toggles the
+    \\default PipeWire source mute and Fn+F9 toggles all rfkill radios.
     \\
     \\Usage: fnx-oem-osd-listener [options]
     \\
@@ -543,6 +774,7 @@ const usage_text = std.fmt.comptimePrint(
     \\  --qs-bin PATH          `qs` executable used for IPC (default: qs)
     \\  --qml-path PATH        Quickshell config path passed as `qs -p PATH`
     \\                         (the standalone OSD shell; required)
+    \\  --wpctl-bin PATH       `wpctl` executable for Fn+F7 (default: wpctl)
     \\  --debounce-ms N        monotonic debounce window (default: {d})
     \\  --check-support        validate the calibrated DMI/WMI/input identity,
     \\                         print the resolved input device, and exit
@@ -568,6 +800,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = gpa.allocator();
 
     var qs_bin: []const u8 = "qs";
+    var wpctl_bin: []const u8 = "wpctl";
     var qml_config: ?[]const u8 = null;
     var debounce_ms: u64 = default_debounce_ms;
     var check_support = false;
@@ -588,6 +821,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) argError("--qs-bin requires a value");
             qs_bin = std.mem.span(args[i]);
+        } else if (std.mem.eql(u8, a, "--wpctl-bin")) {
+            i += 1;
+            if (i >= args.len) argError("--wpctl-bin requires a value");
+            wpctl_bin = std.mem.span(args[i]);
         } else if (std.mem.eql(u8, a, "--qml-path")) {
             i += 1;
             if (i >= args.len) argError("--qml-path requires a value");
@@ -608,6 +845,7 @@ pub fn main(init: std.process.Init) !void {
     if (check_support and check_runtime) argError("--check-support and --check-runtime are mutually exclusive");
     if (!check_support and !check_runtime) {
         if (qs_bin.len == 0) argError("--qs-bin requires a non-empty value");
+        if (wpctl_bin.len == 0) argError("--wpctl-bin requires a non-empty value");
         if (qml_config == null or qml_config.?.len == 0) argError("--qml-path is required and must be non-empty");
     }
 
@@ -670,9 +908,9 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    std.debug.print("fnx-oem-osd-listener {s}: listening (hardware=P916F-STX, device={s}, mapping=0x0020:keyboard-off,0x0021:keyboard-low,0x0022:keyboard-high,0x0030:touchpad-off,0x0031:touchpad-on,0x0041:balanced,0x0042:performance, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, support.kernelDevice(), qs_bin, qml, debounce_ms });
+    std.debug.print("fnx-oem-osd-listener {s}: listening (hardware=P916F-STX, device={s}, mapping=0x0020:keyboard-off,0x0021:keyboard-low,0x0022:keyboard-high,0x0030:touchpad-off,0x0031:touchpad-on,0x0041:balanced,0x0042:performance,0x00a0:airplane-toggle,0x00a1:microphone-toggle, qs={s}, qml={s}, debounce={d}ms); consuming only journal entries newer than startup.\n", .{ version, support.kernelDevice(), qs_bin, qml, debounce_ms });
 
-    var debouncer = Debouncer{ .window_ns = debounce_ns };
+    var debouncer = Debouncer(Admitted){ .window_ns = debounce_ns };
 
     while (true) {
         const n = jl.sd_journal_next(journal.?);
@@ -690,18 +928,31 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
 
-        const event = currentRecordEvent(journal.?, support.kernelDevice()) orelse continue;
+        const admitted = currentRecordAdmission(journal.?, support.kernelDevice()) orelse continue;
         if (monotonicNanos()) |now_ns| {
-            if (!debouncer.accept(event, now_ns)) {
-                std.debug.print("fnx-oem-osd-listener: duplicate {s} OEM event within debounce window; ignored.\n", .{event.token()});
+            if (!debouncer.accept(admitted, now_ns)) {
+                std.debug.print("fnx-oem-osd-listener: duplicate {s} OEM event within debounce window; ignored.\n", .{admitted.token()});
                 continue;
             }
         } else {
             std.debug.print("fnx-oem-osd-listener: monotonic clock unavailable; processing event without debounce.\n", .{});
         }
 
-        std.debug.print("fnx-oem-osd-listener: OEM event confirmed; scancode {s} maps to {s} ({s}).\n", .{ event.scancode(), event.token(), @tagName(event.feature()) });
-        spawnIpc(alloc, init.io, qs_bin, qml, event) catch |err| {
+        const function_name = switch (admitted) {
+            .display => |event| blk: {
+                std.debug.print("fnx-oem-osd-listener: OEM event confirmed; scancode {s} maps to {s} ({s}).\n", .{ event.scancode(), event.token(), @tagName(event.feature()) });
+                break :blk event.ipcFunction();
+            },
+            .request => |request| blk: {
+                const outcome = performRequest(alloc, init.io, system_root, wpctl_bin, request) catch |err| {
+                    std.debug.print("fnx-oem-osd-listener: OEM request {s} ({s}) failed ({s}); OSD not shown.\n", .{ request.token(), request.scancode(), @errorName(err) });
+                    continue;
+                };
+                std.debug.print("fnx-oem-osd-listener: OEM request {s} ({s}) performed; read-back state {s}.\n", .{ request.token(), request.scancode(), outcome.token() });
+                break :blk outcome.ipcFunction();
+            },
+        };
+        spawnIpc(alloc, init.io, qs_bin, qml, function_name) catch |err| {
             std.debug.print("fnx-oem-osd-listener: IPC invocation failed ({s}); not claiming the OSD displayed.\n", .{@errorName(err)});
         };
     }
@@ -758,13 +1009,11 @@ test "mapping: the seven admitted codes have exact typed semantics" {
     try std.testing.expectEqual(OemFeature.performance_mode, OemEvent.mode_balanced.feature());
 }
 
-test "admission: unsupported request and donor codes remain rejected" {
+test "admission: donor and non-canonical codes remain rejected" {
     const unsupported_codes = [_][]const u8{
         "0x0040",
         "0x0050",
         "0x0051",
-        "0x00a0",
-        "0x00a1",
         "0x00a2",
         "0x00A0",
         "0x00A1",
@@ -774,8 +1023,77 @@ test "admission: unsupported request and donor codes remain rejected" {
         var message_buffer: [128]u8 = undefined;
         const message = try std.fmt.bufPrint(&message_buffer, "input input8{s}{s}", .{ UnknownKeyCodePrefix, code });
         try std.testing.expectEqual(@as(?OemEvent, null), eventForScancode(code));
+        try std.testing.expectEqual(@as(?OemRequest, null), requestForScancode(code));
         try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", message));
+        try std.testing.expectEqual(@as(?Admitted, null), admittedForRecord("kernel", "kernel", "input", "+input:input8", message));
     }
+}
+
+test "admission: request codes are admitted only as requests from the exact source" {
+    const cases = [_]struct { request: OemRequest, message: []const u8 }{
+        .{ .request = .airplane_toggle, .message = "input input8: Unknown key pressed, code: 0x00a0" },
+        .{ .request = .microphone_toggle, .message = "input input8: Unknown key pressed, code: 0x00a1" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(Admitted{ .request = case.request }, admittedForRecord("kernel", "kernel", "input", "+input:input8", case.message).?);
+        try std.testing.expectEqual(@as(?OemEvent, null), eventForRecord("kernel", "kernel", "input", "+input:input8", case.message));
+        try std.testing.expectEqual(@as(?Admitted, null), admittedForRecord("stdout", "kernel", "input", "+input:input8", case.message));
+        try std.testing.expectEqual(@as(?Admitted, null), admittedForRecord("kernel", "kernel", "input", "+input:input9", case.message));
+    }
+    for (supported_test_cases) |case| {
+        try std.testing.expectEqual(Admitted{ .display = case.event }, admittedForRecord("kernel", "kernel", "input", "+input:input8", case.message).?);
+    }
+}
+
+test "request: duplicate notification inside the window never toggles twice" {
+    var debouncer = Debouncer(Admitted){ .window_ns = 250 * std.time.ns_per_ms };
+    const mic = Admitted{ .request = .microphone_toggle };
+    try std.testing.expect(debouncer.accept(mic, 0));
+    try std.testing.expect(!debouncer.accept(mic, 100 * std.time.ns_per_ms));
+    try std.testing.expect(debouncer.accept(.{ .request = .airplane_toggle }, 110 * std.time.ns_per_ms));
+    try std.testing.expect(debouncer.accept(.{ .display = .touchpad_on }, 120 * std.time.ns_per_ms));
+    try std.testing.expect(debouncer.accept(mic, 130 * std.time.ns_per_ms));
+}
+
+test "request: wpctl mute parsing accepts only one recognised line" {
+    try std.testing.expectEqual(@as(?bool, true), micMutedFromWpctl("Volume: 1.00 [MUTED]\n"));
+    try std.testing.expectEqual(@as(?bool, false), micMutedFromWpctl("Volume: 0.45\n"));
+    try std.testing.expectEqual(@as(?bool, null), micMutedFromWpctl(""));
+    try std.testing.expectEqual(@as(?bool, null), micMutedFromWpctl("Translate ID error: @DEFAULT_AUDIO_SOURCE@ is not a valid ID\n"));
+    try std.testing.expectEqual(@as(?bool, null), micMutedFromWpctl("Volume: 1.00\nVolume: 1.00 [MUTED]\n"));
+}
+
+test "request: airplane decision blocks while any radio is enabled" {
+    try std.testing.expectEqual(@as(?bool, null), airplaneBlockTarget(.{}));
+    try std.testing.expectEqual(@as(?bool, true), airplaneBlockTarget(.{ .total = 2, .enabled = 1 }));
+    try std.testing.expectEqual(@as(?bool, false), airplaneBlockTarget(.{ .total = 2, .enabled = 0 }));
+    try std.testing.expectEqual(@as(?RequestOutcome, null), airplaneOutcome(.{}));
+    try std.testing.expectEqual(RequestOutcome.airplane_on, airplaneOutcome(.{ .total = 2, .enabled = 0 }).?);
+    try std.testing.expectEqual(RequestOutcome.airplane_off, airplaneOutcome(.{ .total = 2, .enabled = 2 }).?);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 3, 1, 0 }, &rfkillChangeAllEvent(true));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 3, 0, 0 }, &rfkillChangeAllEvent(false));
+}
+
+test "request: rfkill fixture counts soft and hard blocks" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try std.testing.expectEqual(RadioSummary{}, try readRadioSummary(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.createDirPath(io, RfkillClassPath ++ "/rfkill0");
+    try tmp.dir.createDirPath(io, RfkillClassPath ++ "/rfkill1");
+    try tmp.dir.createDirPath(io, RfkillClassPath ++ "/rfkill2");
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill0/soft", .data = "0\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill0/hard", .data = "0\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill1/soft", .data = "1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill1/hard", .data = "0\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill2/soft", .data = "0\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill2/hard", .data = "1\n" });
+    try std.testing.expectEqual(RadioSummary{ .total = 3, .enabled = 1 }, try readRadioSummary(std.testing.allocator, io, tmp.dir));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = RfkillClassPath ++ "/rfkill0/soft", .data = "2\n" });
+    try std.testing.expectError(error.MalformedRfkillState, readRadioSummary(std.testing.allocator, io, tmp.dir));
 }
 
 test "admission: rejects malformed records and messages" {
@@ -844,20 +1162,20 @@ test "typed events expose exact stable tokens and scancodes" {
 test "debounce: only an identical semantic event inside 250 ms is suppressed" {
     const window = 250 * std.time.ns_per_ms;
 
-    var transition = Debouncer{ .window_ns = window };
+    var transition = Debouncer(OemEvent){ .window_ns = window };
     try std.testing.expect(transition.accept(.keyboard_backlight_low, 0));
     try std.testing.expect(transition.accept(.keyboard_backlight_high, 224 * std.time.ns_per_ms));
 
-    var duplicate = Debouncer{ .window_ns = window };
+    var duplicate = Debouncer(OemEvent){ .window_ns = window };
     try std.testing.expect(duplicate.accept(.keyboard_backlight_low, 0));
     try std.testing.expect(!duplicate.accept(.keyboard_backlight_low, 224 * std.time.ns_per_ms));
     try std.testing.expect(duplicate.accept(.keyboard_backlight_low, 250 * std.time.ns_per_ms));
 
-    var cross_feature = Debouncer{ .window_ns = window };
+    var cross_feature = Debouncer(OemEvent){ .window_ns = window };
     try std.testing.expect(cross_feature.accept(.keyboard_backlight_low, 0));
     try std.testing.expect(cross_feature.accept(.touchpad_off, std.time.ns_per_ms));
 
-    var no_window = Debouncer{ .window_ns = 0 };
+    var no_window = Debouncer(OemEvent){ .window_ns = 0 };
     try std.testing.expect(no_window.accept(.mode_balanced, 1));
     try std.testing.expect(no_window.accept(.mode_balanced, 2));
 }
@@ -960,11 +1278,18 @@ test "ipc argv: exact zero-argument wrapper argv for noctalia-qs 0.0.12" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const argv = try ipcArgv(alloc, "/usr/bin/qs", "/opt/fnx-oem-osd/qml", .mode_performance);
+    const argv = try ipcArgv(alloc, "/usr/bin/qs", "/opt/fnx-oem-osd/qml", OemEvent.mode_performance.ipcFunction());
     defer alloc.free(argv);
     const expected = [_][]const u8{ "/usr/bin/qs", "-p", "/opt/fnx-oem-osd/qml", "ipc", "call", "fnx-oem-osd", "showPerformance" };
     try std.testing.expectEqual(expected.len, argv.len);
     for (expected, argv) |e, a| try std.testing.expectEqualStrings(e, a);
+}
+
+test "ipc argv: every request outcome maps to its exact zero-argument wrapper" {
+    const expected = [_][]const u8{ "showMicMuted", "showMicOn", "showAirplaneOn", "showAirplaneOff" };
+    for (std.enums.values(RequestOutcome), expected) |outcome, function_name| {
+        try std.testing.expectEqualStrings(function_name, outcome.ipcFunction());
+    }
 }
 
 test "ipc argv: every supported event maps to its exact zero-argument wrapper" {
