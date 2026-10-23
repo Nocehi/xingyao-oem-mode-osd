@@ -18,4 +18,4 @@ RestartSec=2
 RestartPreventExitStatus=77 78
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
