@@ -142,9 +142,11 @@ power-calibration JSON.
 2. The systemd user manager has the correct Wayland/session environment when
    the OSD starts. Unit syntax cannot prove `WAYLAND_DISPLAY`, compositor
    readiness, output choice, or layer-shell presentation.
-3. `graphical-session.target` ordering exists and is meaningful in the owner's
-   session. The units remain enabled from `default.target`; `After=` orders but
-   does not create the graphical target.
+3. `graphical-session.target` exists and is started by the owner's compositor
+   session. The units are enabled from `graphical-session.target`, so they
+   start after the compositor and again after every logout/login. Units
+   enabled from `default.target` were stopped by `PartOf=` on logout and never
+   restarted, because `default.target` stays active across sessions.
 4. The listener `Wants=` the OSD, but service ordering does not prove the IPC
    handler is ready before an immediate first key press. A failed call is
    logged without retry.
