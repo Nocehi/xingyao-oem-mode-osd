@@ -98,9 +98,18 @@ power-calibration JSON.
    or feature inside that window is admitted. The 224 ms keyboard low-to-high
    regression is covered deterministically. The interval itself has not been
    independently calibrated as a universal firmware duplicate interval.
-10. Airplane `0x00a0`, microphone `0x00a1`, and combined-SKU donor `0x0040`,
-    `0x0050`, `0x0051`, and `0x00a2` are not admitted. The first two are
-    Windows-userspace request events, not safe display-only state reports.
+10. Airplane `0x00a0` and microphone `0x00a1` are Windows-userspace request
+    events, not display-only state reports. They are admitted only as typed
+    requests: the listener toggles the PipeWire default source mute through
+    `wpctl` or writes one global `RFKILL_OP_CHANGE_ALL` event to
+    `/dev/rfkill`, then displays only the state read back afterwards. A failed
+    action or unrecognised read-back shows nothing. Combined-SKU donor
+    `0x0040`, `0x0050`, `0x0051`, and `0x00a2` remain unadmitted.
+11. The request actions assume a PipeWire session reachable from the user
+    manager, `wpctl` on `PATH` (or `--wpctl-bin`), and user write access to
+    `/dev/rfkill`. The 250 ms debounce is what prevents a duplicate WMI
+    notification from toggling twice; it is not independently calibrated for
+    these two codes.
 
 ### Journal and listener runtime
 

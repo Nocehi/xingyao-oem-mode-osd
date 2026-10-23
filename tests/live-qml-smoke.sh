@@ -54,6 +54,8 @@ for function_name in \
     showPerformance showBalanced \
     showKeyboardOff showKeyboardLow showKeyboardHigh \
     showTouchpadOff showTouchpadOn \
+    showMicMuted showMicOn \
+    showAirplaneOn showAirplaneOff \
     showUnknown; do
     output_file="$smoke_root/$function_name.log"
     qs -p "$smoke_root/qml" ipc call fnx-oem-osd "$function_name" > "$output_file"

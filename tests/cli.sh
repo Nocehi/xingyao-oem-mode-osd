@@ -43,6 +43,8 @@ expect_exit_2 missing-qml
 expect_exit_2 missing-qml-value --qml-path
 expect_exit_2 empty-qml --qml-path ''
 expect_exit_2 empty-qs --qml-path /tmp --qs-bin ''
+expect_exit_2 empty-wpctl --qml-path /tmp --wpctl-bin ''
+expect_exit_2 missing-wpctl-value --qml-path /tmp --wpctl-bin
 expect_exit_2 negative-debounce --debounce-ms -1 --qml-path /tmp
 expect_exit_2 overflowing-debounce --debounce-ms 18446744073709551615 --qml-path /tmp
 expect_exit_2 conflicting-checks --check-support --check-runtime

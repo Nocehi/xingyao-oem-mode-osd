@@ -1,8 +1,9 @@
 # xingyao-oem-mode-osd
 
-Quickshell OSD for calibrated display-only OEM events on the MECHREVO Xingyao
-14 P916F-STX under Linux: Fn+X performance mode, Fn+F8 keyboard backlight, and
-Fn+F3 touchpad state.
+Quickshell OSD for calibrated OEM events on the MECHREVO Xingyao 14
+P916F-STX under Linux: Fn+X performance mode, Fn+F8 keyboard backlight, and
+Fn+F3 touchpad state are display-only; Fn+F7 microphone mute and Fn+F9
+airplane mode are performed by the listener and then displayed.
 
 This repository is deliberately not a generic Huawei/Mechrevo mode switcher.
 The runtime has no hardware-override option and fails closed outside the exact
@@ -48,12 +49,30 @@ _KERNEL_DEVICE=+input:<the resolved Huawei WMI inputN>
 MESSAGE=input <the same inputN>: Unknown key pressed, code: <supported exact code>
 ```
 
-The seven admitted scancodes become typed semantic events and are sent to a
-standalone Quickshell OSD through argv-only IPC. The listener does not grab or
-inject input, use an evdev fallback, call `journalctl`, invoke WMI/EC methods,
-change power/radio/audio/touchpad/backlight state, or persist a guessed state.
-Firmware/EC has already formed every state this listener displays. A repeated
-identical event inside 250 ms is debounced; a transition to another state or
+The seven display-only scancodes become typed semantic events and are sent to
+a standalone Quickshell OSD through argv-only IPC. Firmware/EC has already
+formed each of those states; the listener does not change power, touchpad, or
+backlight state.
+
+The two request scancodes are different: firmware forms no state for them, and
+on Windows the OEM userspace service performs the action. The listener
+therefore performs the equivalent Linux action and displays only the state it
+reads back afterwards:
+
+- Fn+F7 (`0x00a1`) runs `wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle`, then
+  reads `wpctl get-volume`. The `platform::micmute` LED follows through its
+  existing `audio-micmute` trigger.
+- Fn+F9 (`0x00a0`) writes one `RFKILL_OP_CHANGE_ALL` event to `/dev/rfkill`:
+  while any radio is enabled it blocks all, otherwise it unblocks all. It then
+  re-reads `/sys/class/rfkill/*/{soft,hard}`; airplane mode is shown as on
+  exactly when no radio is enabled. The calling user needs write access to
+  `/dev/rfkill` (the usual `rfkill` group or seat ACL).
+
+A failed action or unreadable read-back is logged and shows no OSD. The
+listener does not grab or inject input, use an evdev fallback, call
+`journalctl`, invoke WMI/EC methods, or persist a guessed state. A repeated
+identical event inside 250 ms is debounced, which also stops a duplicate WMI
+notification from toggling a request twice; a transition to another state or
 feature is never discarded as a duplicate.
 
 The OSD stays visible for about 1.5 seconds. It can read
@@ -78,9 +97,12 @@ not this process.
 | `0x0031` | `touchpad_on` | Touchpad / `Touchpad on` |
 | `0x0041` | `mode_balanced` | Fn+X OEM / `Balanced mode` |
 | `0x0042` | `mode_performance` | Fn+X OEM / `Performance mode` |
+| `0x00a0` | request `airplane_toggle` | Airplane mode / `Airplane mode on` or `off` (read back) |
+| `0x00a1` | request `microphone_toggle` | Microphone / `Microphone muted` or `on` (read back) |
 
-The mapping is stateless. Each admitted record selects its own display state,
-including after a listener or desktop-session restart.
+The display mapping is stateless. Each admitted display record selects its own
+state, including after a listener or desktop-session restart. Request records
+toggle live Linux state and display the read-back result.
 
 ## Requirements
 
@@ -196,12 +218,13 @@ qs -p "$PWD/qml" ipc call fnx-oem-osd showTouchpadOff
 
 The production listener uses zero-argument wrappers for every supported state:
 `showPerformance`, `showBalanced`, `showKeyboardOff`, `showKeyboardLow`,
-`showKeyboardHigh`, `showTouchpadOff`, and `showTouchpadOn`. The existing two
+`showKeyboardHigh`, `showTouchpadOff`, `showTouchpadOn`, `showMicMuted`,
+`showMicOn`, `showAirplaneOn`, and `showAirplaneOff`. The existing two
 mode wrappers remain compatible. This path was chosen for noctalia-qs 0.0.12,
 whose `ipc call` command rejects positional function arguments. An accepted IPC
 response is not proof that a compositor visibly presented the surface.
 
-For a disposable session-dependent round-trip of all seven production wrappers
+For a disposable session-dependent round-trip of all eleven production wrappers
 plus the manual unknown-state compatibility fallback, run:
 
 ```sh
@@ -317,13 +340,26 @@ exact EC, firmware, or device-internal mechanism.
 
 These are operator/observer-transcribed observations; this repository does not
 ship the raw journal or libinput transcripts or hashes for them. The
-implementation is display-only and does not cause either state transition.
-Fn+F7 microphone (`0x00a1`), Fn+F9 airplane mode (`0x00a0`), and combined-SKU
-donor codes `0x0040`, `0x0050`, `0x0051`, and `0x00a2` remain deliberately
-unadmitted.
+implementation is display-only for these keys and does not cause either state
+transition. Combined-SKU donor codes `0x0040`, `0x0050`, `0x0051`, and `0x00a2`
+remain deliberately unadmitted.
+
+### Request keys
+
+On 2026-10-23 the strict Huawei WMI journal source on this host logged
+`0x00a1` for Fn+F7 as an unknown key, so no keysym reaches userspace and
+nothing on Linux acted on it before this listener handled requests. Fn+F9
+`0x00a0` is the original operator's observation. The physical Fn+F7/Fn+F9
+round-trip through the listener actions has not yet been observed.
 
 See [`docs/owner-audit.md`](docs/owner-audit.md) for the complete assumption,
 failure-mode, evidence-class, and future revalidation ledger.
+
+## Out of scope
+
+Display brightness is not handled here. DankMaterialShell already reads the
+standard brightness keys and shows its own OSD, so this project adds no
+brightness listener or wrapper.
 
 ## Limitations and revalidation boundary
 

@@ -4,7 +4,8 @@ pragma ComponentBehavior: Bound
 // Run it with:   qs -p <this-directory>
 // Then:          qs -p <this-directory> ipc call fnx-oem-osd showPerformance
 // The OSD is display-only: no keyboard focus, no pointer capture, no
-// exclusive zone reservation. Display labels follow the system locale; IPC
+// exclusive zone reservation. Microphone and airplane states are shown only
+// after the listener has performed the request and read the state back. Display labels follow the system locale; IPC
 // event tokens remain stable English identifiers.
 
 import QtCore
@@ -73,6 +74,8 @@ PanelWindow {
             return root.colorOrFallback("primary_container");
         case "balanced":
         case "touchpad-on":
+        case "microphone-on":
+        case "airplane-off":
             return root.colorOrFallback("tertiary_container");
         default:
             return root.colorOrFallback("secondary_container");
@@ -84,6 +87,8 @@ PanelWindow {
             return root.colorOrFallback("on_primary_container");
         case "balanced":
         case "touchpad-on":
+        case "microphone-on":
+        case "airplane-off":
             return root.colorOrFallback("on_tertiary_container");
         default:
             return root.colorOrFallback("on_secondary_container");
@@ -118,6 +123,10 @@ PanelWindow {
         case "keyboard-backlight-high":
         case "touchpad-off":
         case "touchpad-on":
+        case "microphone-muted":
+        case "microphone-on":
+        case "airplane-on":
+        case "airplane-off":
         case "unknown":
             return true;
         default:
@@ -137,6 +146,12 @@ PanelWindow {
         case "touchpad-off":
         case "touchpad-on":
             return "touchpad";
+        case "microphone-muted":
+        case "microphone-on":
+            return "microphone";
+        case "airplane-on":
+        case "airplane-off":
+            return "airplane-mode";
         default:
             return "unknown";
         }
@@ -150,6 +165,10 @@ PanelWindow {
             return root.useChinese ? "Fn+F8 · 鍵盤背光" : "Fn+F8 · Keyboard backlight";
         case "touchpad":
             return root.useChinese ? "Fn+F3 · 觸控板" : "Fn+F3 · Touchpad";
+        case "microphone":
+            return root.useChinese ? "Fn+F7 · 麥克風" : "Fn+F7 · Microphone";
+        case "airplane-mode":
+            return root.useChinese ? "Fn+F9 · 飛航模式" : "Fn+F9 · Airplane mode";
         default:
             return "OEM";
         }
@@ -171,6 +190,14 @@ PanelWindow {
             return root.useChinese ? "觸控板關閉" : "Touchpad off";
         case "touchpad-on":
             return root.useChinese ? "觸控板開啟" : "Touchpad on";
+        case "microphone-muted":
+            return root.useChinese ? "麥克風已靜音" : "Microphone muted";
+        case "microphone-on":
+            return root.useChinese ? "麥克風已開啟" : "Microphone on";
+        case "airplane-on":
+            return root.useChinese ? "飛航模式開啟" : "Airplane mode on";
+        case "airplane-off":
+            return root.useChinese ? "飛航模式關閉" : "Airplane mode off";
         default:
             // Compatibility fallback for direct/manual IPC callers. The
             // production listener maps every admitted code to a named event.
@@ -295,6 +322,22 @@ PanelWindow {
 
         function showTouchpadOn(): string {
             return root.showEvent("touchpad-on");
+        }
+
+        function showMicMuted(): string {
+            return root.showEvent("microphone-muted");
+        }
+
+        function showMicOn(): string {
+            return root.showEvent("microphone-on");
+        }
+
+        function showAirplaneOn(): string {
+            return root.showEvent("airplane-on");
+        }
+
+        function showAirplaneOff(): string {
+            return root.showEvent("airplane-off");
         }
 
         function showUnknown(): string {
@@ -516,6 +559,108 @@ PanelWindow {
                             rotation: -42
                             color: root.accentForegroundColor
                             visible: root.currentEvent === "touchpad-off"
+                        }
+                    }
+
+                    Item {
+                        id: microphoneIcon
+
+                        anchors.centerIn: parent
+                        width: 18
+                        height: 22
+                        visible: root.currentFeature === "microphone"
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 0
+                            width: 8
+                            height: 13
+                            radius: 4
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 6
+                            width: 14
+                            height: 11
+                            radius: 7
+                            color: "transparent"
+                            border.color: root.accentForegroundColor
+                            border.width: 2
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 16
+                            width: 2
+                            height: 4
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 20
+                            width: 8
+                            height: 2
+                            radius: 1
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 2
+                            height: 26
+                            radius: 1
+                            rotation: -42
+                            color: root.accentForegroundColor
+                            visible: root.currentEvent === "microphone-muted"
+                        }
+                    }
+
+                    Item {
+                        id: airplaneIcon
+
+                        anchors.centerIn: parent
+                        width: 22
+                        height: 22
+                        visible: root.currentFeature === "airplane-mode"
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 1
+                            width: 4
+                            height: 20
+                            radius: 2
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 8
+                            width: 22
+                            height: 3
+                            radius: 1.5
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 18
+                            width: 10
+                            height: 2
+                            radius: 1
+                            color: root.accentForegroundColor
+                        }
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 2
+                            height: 28
+                            radius: 1
+                            rotation: -42
+                            color: root.accentForegroundColor
+                            visible: root.currentEvent === "airplane-off"
                         }
                     }
                 }
