@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build with Zig 0.16.0 while preserving compatibility with current Arch CRTs.
+# Build with Zig 0.17.0 while preserving compatibility with current Arch CRTs.
 set -eu
 
 command -v zig >/dev/null 2>&1 || {
@@ -7,8 +7,8 @@ command -v zig >/dev/null 2>&1 || {
     exit 1
 }
 zig_version=$(zig version)
-[ "$zig_version" = 0.16.0 ] || {
-    printf 'zig-build.sh: Zig 0.16.0 is required (found %s)\n' "$zig_version" >&2
+[ "$zig_version" = 0.17.0 ] || {
+    printf 'zig-build.sh: Zig 0.17.0 is required (found %s)\n' "$zig_version" >&2
     exit 1
 }
 
@@ -40,9 +40,9 @@ if [ -n "$native_crt_dir" ] && [ -f "$native_crt_dir/crt1.o" ]; then
     fi
 fi
 
-# The official Zig 0.16.0 Linux binary cannot parse R_X86_64_PC64
+# The official Zig 0.16.0 Linux binary could not parse R_X86_64_PC64
 # relocations in the .sframe metadata emitted by current Arch GCC 16 CRT
-# objects. Packaged Zig builds may already handle them. When needed, strip
+# objects. The workaround is kept for 0.17.0 until it is shown unnecessary. When needed, strip
 # only that metadata from disposable start-file copies; never modify /usr/lib.
 if [ "$has_sframe" = true ]; then
     for command_name in awk objcopy; do

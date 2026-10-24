@@ -175,7 +175,7 @@ power-calibration JSON.
 
 ### Build and lifecycle
 
-1. The release gate is tested on x86_64 Arch with Zig 0.16.0, current systemd,
+1. The release gate is tested on x86_64 Arch with Zig 0.17.0, current systemd,
    Qt 6, Quickshell, ShellCheck, GNU coreutils, binutils, and POSIX `sh`.
    Other distributions and cross targets are not claimed.
 2. The Zig wrapper's `.sframe` workaround applies only to disposable copies of

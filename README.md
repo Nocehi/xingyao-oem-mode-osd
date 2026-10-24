@@ -108,7 +108,7 @@ toggle live Linux state and display the read-back result.
 
 - the exact MECHREVO P916F-STX DMI/WMI/input identity above
 - Linux, libsystemd, and user-visible kernel journal records
-- Zig 0.16.0, binutils, and libsystemd headers/libraries to build
+- Zig 0.17.0, binutils, and libsystemd headers/libraries to build
 - Quickshell (`qs`) and Qt 6 QML tooling
 - GNU coreutils (`env`, `sha256sum`, `mktemp`) and POSIX `sh` for lifecycle scripts
 - ShellCheck and `systemd-analyze` for the canonical release gate
@@ -121,13 +121,13 @@ distributions and cross builds are not claimed.
 ## Build and install
 
 This audited tree identifies itself as `0.3.0-dev`; it is not a claim that a
-new release was published. Build it with Zig 0.16.0:
+new release was published. Build it with Zig 0.17.0:
 
 ```sh
 ./scripts/zig-build.sh -Doptimize=ReleaseSmall
 ```
 
-The wrapper never edits native CRT files. When the Zig 0.16.0/Arch GCC 16
+The wrapper never edits native CRT files. When the Zig 0.17.0/Arch GCC 16
 `.sframe` incompatibility is present, it strips that metadata only from
 disposable CRT copies.
 
@@ -281,7 +281,7 @@ checksum/foreign-file refusal, split-update repair/removal, idempotent
 install/uninstall, and `systemd-analyze --user verify`.
 
 GitHub Actions executes the same command in a rolling Arch container with the
-official Zig 0.16.0 x86_64 tarball pinned by SHA256. The Arch container and
+official Zig 0.17.0 x86_64 tarball pinned by SHA256. The Arch container and
 repository action tags are not a fully reproducible dependency snapshot.
 
 ## Calibration evidence and claim ceiling

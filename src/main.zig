@@ -33,12 +33,7 @@
 //!     status is checked; a failure is reported, never claimed as shown.
 
 const std = @import("std");
-const jl = @cImport({
-    @cInclude("systemd/sd-journal.h");
-    @cInclude("string.h");
-    @cInclude("time.h");
-    @cInclude("unistd.h");
-});
+const jl = @import("c");
 
 pub const version = "0.3.0-dev";
 

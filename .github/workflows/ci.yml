@@ -22,18 +22,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
-      - name: Install pinned Zig 0.16.0
+      - name: Install pinned Zig 0.17.0
         env:
-          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
-          ZIG_URL: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+          ZIG_URL: https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
         run: |
-          zig_archive=/tmp/zig-x86_64-linux-0.16.0.tar.xz
+          zig_archive=/tmp/zig-x86_64-linux-0.17.0.tar.xz
           curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$zig_archive" "$ZIG_URL"
           printf '%s  %s\n' "$ZIG_SHA256" "$zig_archive" \
             | sha256sum --check --strict -
           tar -xJf "$zig_archive" -C /opt
-          printf '%s\n' /opt/zig-x86_64-linux-0.16.0 >> "$GITHUB_PATH"
+          printf '%s\n' /opt/zig-x86_64-linux-0.17.0 >> "$GITHUB_PATH"
 
       - name: Run canonical gate
         run: ./scripts/check.sh

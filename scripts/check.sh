@@ -19,8 +19,8 @@ for required_command in zig objcopy readelf shellcheck systemd-analyze sha256sum
     command -v "$required_command" >/dev/null 2>&1 || fail "$required_command not found"
 done
 zig_version=$(zig version)
-[ "$zig_version" = 0.16.0 ] || fail "Zig 0.16.0 required (found $zig_version)"
-ok "Zig version 0.16.0"
+[ "$zig_version" = 0.17.0 ] || fail "Zig 0.17.0 required (found $zig_version)"
+ok "Zig version 0.17.0"
 
 # Arch keeps the Qt 6 QML tools outside PATH. Prefer them explicitly so a
 # separately installed Qt 5 wrapper cannot silently lint Quickshell's Qt 6 QML.
@@ -80,7 +80,7 @@ ok "ShellCheck"
 
 [ -x zig-out/bin/fnx-oem-osd-listener ] || fail "zig-out/bin/fnx-oem-osd-listener missing"
 for artifact in \
-    README.md LICENSE build.zig src/main.zig test_suite.zig qml/shell.qml \
+    README.md LICENSE build.zig src/main.zig src/c.h test_suite.zig qml/shell.qml \
     assets/performance-mode.png .github/workflows/ci.yml scripts/zig-build.sh \
     scripts/qmllint-gate.sh tests/qmllint-gate.sh tests/cli_fixture.zig \
     docs/owner-audit.md evidence/p916f-stx-calibration-v1.json \
