@@ -4,6 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Zig 0.17 removed @cImport; the C declarations are translated here.
+    const c_mod = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }).createModule();
+
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -16,11 +24,12 @@ pub fn build(b: *std.Build) void {
     // Libs: line (systemd-libs split), so pkg-config resolves it to nothing;
     // direct -lsystemd search works.
     mod.linkSystemLibrary("systemd", .{ .use_pkg_config = .no });
+    mod.addImport("c", c_mod);
     const exe = b.addExecutable(.{
         .name = "fnx-oem-osd-listener",
         .root_module = mod,
         // Select the host linker for native builds. scripts/zig-build.sh also
-        // handles the official Zig 0.16.0 binary's Arch GCC 16 CRT parser gap.
+        // handles the Arch GCC 16 CRT .sframe parser gap.
         .use_lld = false,
     });
     exe.use_new_linker = false;
@@ -55,6 +64,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.linkSystemLibrary("systemd", .{ .use_pkg_config = .no });
+    test_mod.addImport("c", c_mod);
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
         .use_lld = false,
