@@ -307,11 +307,20 @@ PanelWindow {
     Region {
         id: blurRegion
 
-        x: (root.width - card.width) / 2
-        y: (root.height - card.height) / 2
-        width: card.width
-        height: card.height
-        radius: card.radius
+        // Follow the card's entrance/exit animation: scale with it, slide with
+        // it, and collapse with its opacity so compositor blur (which cannot
+        // fade) is never visible outside the tinted card. Positions are taken
+        // from the card's centre because the card is anchored, so card.y is
+        // already absolute.
+        readonly property real s: card.scale * card.opacity
+        readonly property real w: card.width * s
+        readonly property real h: card.height * s
+
+        x: card.x + (card.width - w) / 2
+        y: card.y + (card.height - h) / 2
+        width: Math.max(0, w)
+        height: Math.max(0, h)
+        radius: Math.min(card.radius * s, h / 2)
     }
 
     // Same probe DMS uses for ext-background-effect-v1. A missing `dms`
@@ -454,7 +463,7 @@ PanelWindow {
         width: 264
         height: 66
         opacity: root.shouldBeVisible ? 1 : 0
-        scale: root.shouldBeVisible ? 1 : 0.94
+        scale: root.shouldBeVisible ? 1 : 0.9
         y: root.shouldBeVisible ? 0 : 5
 
         Rectangle {

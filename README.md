@@ -86,7 +86,9 @@ a compositor background blur requested through Quickshell's
 highlight rim lit from 233° (y-down). Otherwise it renders opaque
 `surface_container_high`. The 1 px border is `outline` at 35% in both tiers.
 On niri 26.04 the client request alone is honored; no layer rule is needed for
-the default `quickshell` namespace.
+the default `quickshell` namespace. The blur region tracks the card's scale,
+slide and opacity during the show/hide animation so the blur never shows
+outside the tinted card.
 All `zh*` locales use Chinese feature/state labels; other locales use English.
 IPC tokens remain stable English identifiers.
 
