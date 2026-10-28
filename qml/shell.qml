@@ -10,6 +10,7 @@ pragma ComponentBehavior: Bound
 
 import QtCore
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
@@ -637,47 +638,48 @@ PanelWindow {
                         id: touchpadIcon
 
                         anchors.centerIn: parent
-                        width: 23
-                        height: 17
+                        width: 24
+                        height: 24
                         visible: root.currentFeature === "touchpad"
 
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 3
-                            color: "transparent"
-                            border.color: root.accentForegroundColor
-                            border.width: 2
-                        }
+                        Item {
+                            id: touchpadGlyph
 
-                        Rectangle {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: 11
-                            width: parent.width - 4
-                            height: 1
-                            color: root.accentForegroundColor
+                            anchors.fill: parent
+                            layer.enabled: root.currentEvent === "touchpad-off"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
+                            }
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 23
+                                height: 17
+                                radius: 3
+                                color: "transparent"
+                                border.color: root.accentForegroundColor
+                                border.width: 2
+
+                                Rectangle {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    y: 11
+                                    width: parent.width - 4
+                                    height: 1
+                                    color: root.accentForegroundColor
+                                }
+                            }
                         }
 
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
+                            anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             visible: root.currentEvent === "touchpad-off"
-
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
-                            ShapePath {
-                                strokeColor: root.accentTileColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
-                                }
-                            }
 
                             ShapePath {
                                 strokeColor: root.accentForegroundColor
@@ -694,56 +696,55 @@ PanelWindow {
                         }
                     }
 
-                    Shape {
+                    Item {
                         id: microphoneIcon
 
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        preferredRendererType: Shape.CurveRenderer
                         visible: root.currentFeature === "microphone"
 
-                        ShapePath {
-                            strokeColor: "transparent"
-                            fillColor: root.accentForegroundColor
+                        Shape {
+                            id: microphoneGlyph
 
-                            PathSvg {
-                                path: "M12 2.5 C13.66 2.5 15 3.84 15 5.5 L15 11 C15 12.66 13.66 14 12 14 C10.34 14 9 12.66 9 11 L9 5.5 C9 3.84 10.34 2.5 12 2.5 Z"
+                            anchors.fill: parent
+                            preferredRendererType: Shape.CurveRenderer
+                            layer.enabled: root.currentEvent === "microphone-muted"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
                             }
-                        }
 
-                        ShapePath {
-                            strokeColor: root.accentForegroundColor
-                            strokeWidth: 2
-                            fillColor: "transparent"
-                            capStyle: ShapePath.RoundCap
+                            ShapePath {
+                                strokeColor: "transparent"
+                                fillColor: root.accentForegroundColor
 
-                            PathSvg {
-                                path: "M6.5 10.5 C6.5 13.8 9 16.5 12 16.5 C15 16.5 17.5 13.8 17.5 10.5 M12 16.5 L12 20.5 M9 20.5 L15 20.5"
+                                PathSvg {
+                                    path: "M12 2.5 C13.66 2.5 15 3.84 15 5.5 L15 11 C15 12.66 13.66 14 12 14 C10.34 14 9 12.66 9 11 L9 5.5 C9 3.84 10.34 2.5 12 2.5 Z"
+                                }
+                            }
+
+                            ShapePath {
+                                strokeColor: root.accentForegroundColor
+                                strokeWidth: 2
+                                fillColor: "transparent"
+                                capStyle: ShapePath.RoundCap
+
+                                PathSvg {
+                                    path: "M6.5 10.5 C6.5 13.8 9 16.5 12 16.5 C15 16.5 17.5 13.8 17.5 10.5 M12 16.5 L12 20.5 M9 20.5 L15 20.5"
+                                }
                             }
                         }
 
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
+                            anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             visible: root.currentEvent === "microphone-muted"
-
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
-                            ShapePath {
-                                strokeColor: root.accentTileColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
-                                }
-                            }
 
                             ShapePath {
                                 strokeColor: root.accentForegroundColor
@@ -760,45 +761,44 @@ PanelWindow {
                         }
                     }
 
-                    Shape {
+                    Item {
                         id: airplaneIcon
 
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        preferredRendererType: Shape.CurveRenderer
                         visible: root.currentFeature === "airplane-mode"
 
-                        ShapePath {
-                            strokeColor: "transparent"
-                            fillColor: root.accentForegroundColor
+                        Shape {
+                            id: airplaneGlyph
 
-                            PathSvg {
-                                path: "M12 2 C12.9 2 13.5 2.9 13.5 4 L13.5 9.3 L21 13.6 L21 15.6 L13.5 13.4 L13.5 18 L16 19.8 L16 21.5 L12 20.4 L8 21.5 L8 19.8 L10.5 18 L10.5 13.4 L3 15.6 L3 13.6 L10.5 9.3 L10.5 4 C10.5 2.9 11.1 2 12 2 Z"
+                            anchors.fill: parent
+                            preferredRendererType: Shape.CurveRenderer
+                            layer.enabled: root.currentEvent === "airplane-off"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
+                            }
+
+                            ShapePath {
+                                strokeColor: "transparent"
+                                fillColor: root.accentForegroundColor
+
+                                PathSvg {
+                                    path: "M12 2 C12.9 2 13.5 2.9 13.5 4 L13.5 9.3 L21 13.6 L21 15.6 L13.5 13.4 L13.5 18 L16 19.8 L16 21.5 L12 20.4 L8 21.5 L8 19.8 L10.5 18 L10.5 13.4 L3 15.6 L3 13.6 L10.5 9.3 L10.5 4 C10.5 2.9 11.1 2 12 2 Z"
+                                }
                             }
                         }
 
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
+                            anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             visible: root.currentEvent === "airplane-off"
-
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
-                            ShapePath {
-                                strokeColor: root.accentTileColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
-                                }
-                            }
 
                             ShapePath {
                                 strokeColor: root.accentForegroundColor
@@ -811,6 +811,30 @@ PanelWindow {
                                     x: 20
                                     y: 21
                                 }
+                            }
+                        }
+                    }
+
+                    // Thick slash used as an inverted mask to cut the slashed glyphs.
+                    Shape {
+                        id: slashCutMask
+
+                        width: 24
+                        height: 24
+                        visible: false
+                        layer.enabled: true
+                        preferredRendererType: Shape.CurveRenderer
+
+                        ShapePath {
+                            strokeColor: "white"
+                            strokeWidth: 6
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            startX: 4
+                            startY: 3
+                            PathLine {
+                                x: 20
+                                y: 21
                             }
                         }
                     }
