@@ -83,6 +83,8 @@ PanelWindow {
     // lower-right at 65% of that.
     readonly property color rimLitColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.22)
     readonly property color rimShadeColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.143)
+    // Inside a frost card the accent tile is translucent so the blur reads through it; opaque tier keeps the M3 tonal tile.
+    readonly property color accentTileColor: root.frostActive ? Qt.alpha(root.accentColor, 0.6) : root.accentColor
     readonly property color accentColor: {
         switch (root.currentEvent) {
         case "performance":
@@ -464,7 +466,7 @@ PanelWindow {
         height: 66
         opacity: root.shouldBeVisible ? 1 : 0
         scale: root.shouldBeVisible ? 1 : 0.9
-        y: root.shouldBeVisible ? 0 : 5
+        anchors.verticalCenterOffset: root.shouldBeVisible ? 0 : 5
 
         Rectangle {
             anchors.fill: parent
@@ -541,8 +543,8 @@ PanelWindow {
             Rectangle {
                 width: 42
                 height: 42
-                radius: 14
-                color: root.accentColor
+                radius: Math.max(8, card.radius - 12)
+                color: root.accentTileColor
 
                 Item {
                     anchors.centerIn: parent
@@ -665,7 +667,7 @@ PanelWindow {
                             // A wider accent-coloured stroke cuts the glyph so the slash reads
                             // as a separate mark rather than merging into the icon.
                             ShapePath {
-                                strokeColor: root.accentColor
+                                strokeColor: root.accentTileColor
                                 strokeWidth: 5
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -731,7 +733,7 @@ PanelWindow {
                             // A wider accent-coloured stroke cuts the glyph so the slash reads
                             // as a separate mark rather than merging into the icon.
                             ShapePath {
-                                strokeColor: root.accentColor
+                                strokeColor: root.accentTileColor
                                 strokeWidth: 5
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -786,7 +788,7 @@ PanelWindow {
                             // A wider accent-coloured stroke cuts the glyph so the slash reads
                             // as a separate mark rather than merging into the icon.
                             ShapePath {
-                                strokeColor: root.accentColor
+                                strokeColor: root.accentTileColor
                                 strokeWidth: 5
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -858,7 +860,7 @@ PanelWindow {
             }
         }
 
-        Behavior on y {
+        Behavior on anchors.verticalCenterOffset {
             NumberAnimation {
                 duration: root.animationDuration
                 easing.type: Easing.OutCubic
