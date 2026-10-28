@@ -31,33 +31,38 @@ PanelWindow {
     property var matugenData: ({})
     property var dmsSettings: ({})
     property bool isLightMode: false
+    // Fallbacks mirror the current matugen scheme from DMS's dms-colors.json.
     readonly property var fallbackDark: ({
-            "surface_container_high": "#261e18",
-            "surface_container_highest": "#302921",
-            "on_surface": "#eee0d5",
-            "on_surface_variant": "#d5c3b5",
-            "primary": "#fcb974",
-            "primary_container": "#693c00",
-            "on_primary_container": "#ffdcbd",
-            "secondary_container": "#59422c",
-            "on_secondary_container": "#fedcbe",
-            "tertiary_container": "#404b25",
-            "on_tertiary_container": "#dbe8b5",
-            "outline_variant": "#50453a"
+            "surface": "#11140e",
+            "surface_container_high": "#282b24",
+            "surface_container_highest": "#33362e",
+            "on_surface": "#e2e3d9",
+            "on_surface_variant": "#c4c8ba",
+            "primary": "#aed18d",
+            "primary_container": "#324e18",
+            "on_primary_container": "#caeea6",
+            "secondary_container": "#3f4a34",
+            "on_secondary_container": "#dae7c9",
+            "tertiary_container": "#1e4e4c",
+            "on_tertiary_container": "#bbece9",
+            "outline": "#8e9286",
+            "outline_variant": "#44483e"
         })
     readonly property var fallbackLight: ({
-            "surface_container_high": "#faebe0",
-            "surface_container_highest": "#f4e6da",
-            "on_surface": "#211a14",
-            "on_surface_variant": "#50453a",
-            "primary": "#855317",
-            "primary_container": "#ffdcbd",
-            "on_primary_container": "#2c1600",
-            "secondary_container": "#fedcbe",
-            "on_secondary_container": "#291806",
-            "tertiary_container": "#dbe8b5",
-            "on_tertiary_container": "#161f01",
-            "outline_variant": "#d5c3b5"
+            "surface": "#f9faef",
+            "surface_container_high": "#e7e9de",
+            "surface_container_highest": "#e2e3d9",
+            "on_surface": "#1a1d16",
+            "on_surface_variant": "#44483e",
+            "primary": "#49672e",
+            "primary_container": "#caeea6",
+            "on_primary_container": "#0d2000",
+            "secondary_container": "#dae7c9",
+            "on_secondary_container": "#151e0c",
+            "tertiary_container": "#bbece9",
+            "on_tertiary_container": "#00201f",
+            "outline": "#74796d",
+            "outline_variant": "#c4c8ba"
         })
     readonly property var fallbackColors: root.isLightMode ? root.fallbackLight : root.fallbackDark
     readonly property var activeColors: {
@@ -65,10 +70,19 @@ PanelWindow {
         const selected = variants && variants[root.isLightMode ? "light" : "dark"];
         return selected || root.fallbackColors;
     }
-    readonly property color surfaceColor: root.colorOrFallback("surface_container_high")
+    // Frost tier needs both a valid DMS colour cache and compositor blur that
+    // DMS reports as supported and enabled; otherwise the card stays opaque.
+    property bool blurSupported: false
+    readonly property bool hasDmsColors: Boolean(root.matugenData && root.matugenData.colors)
+    readonly property bool frostActive: root.hasDmsColors && root.blurSupported && root.dmsSettings.blurEnabled === true
+    readonly property color surfaceColor: root.frostActive ? Qt.alpha(root.colorOrFallback("surface"), 0.9) : root.colorOrFallback("surface_container_high")
     readonly property color surfaceForegroundColor: root.colorOrFallback("on_surface")
     readonly property color surfaceMutedColor: root.colorOrFallback("on_surface_variant")
-    readonly property color outlineColor: root.colorOrFallback("outline_variant")
+    readonly property color outlineColor: Qt.alpha(root.colorOrFallback("outline"), 0.35)
+    // Directional rim lit from 233 degrees (y-down): upper-left edges at 22%,
+    // lower-right at 65% of that.
+    readonly property color rimLitColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.22)
+    readonly property color rimShadeColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.143)
     readonly property color accentColor: {
         switch (root.currentEvent) {
         case "performance":
@@ -288,6 +302,30 @@ PanelWindow {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    BackgroundEffect.blurRegion: root.frostActive ? blurRegion : null
+
+    Region {
+        id: blurRegion
+
+        x: (root.width - card.width) / 2
+        y: (root.height - card.height) / 2
+        width: card.width
+        height: card.height
+        radius: card.radius
+    }
+
+    // Same probe DMS uses for ext-background-effect-v1. A missing `dms`
+    // binary or any other answer keeps the opaque fallback.
+    Process {
+        id: blurProbe
+
+        command: ["dms", "blur", "check"]
+        running: true
+
+        stdout: StdioCollector {
+            onStreamFinished: root.blurSupported = text.trim() === "supported"
+        }
+    }
 
     IpcHandler {
         function show(mode: string): string {
@@ -410,6 +448,9 @@ PanelWindow {
         id: card
 
         anchors.centerIn: parent
+        readonly property real radius: Math.min(root.themeCornerRadius, height / 2)
+        readonly property real rimWidth: 1.5
+
         width: 264
         height: 66
         opacity: root.shouldBeVisible ? 1 : 0
@@ -418,10 +459,63 @@ PanelWindow {
 
         Rectangle {
             anchors.fill: parent
-            radius: Math.min(root.themeCornerRadius, height / 2)
+            radius: card.radius
             color: root.surfaceColor
             border.color: root.outlineColor
             border.width: 1
+        }
+
+        // Inner highlight ring just inside the 1 px border: an odd-even fill
+        // between two rounded rectangles, shaded along the light direction.
+        Shape {
+            anchors.fill: parent
+            anchors.margins: 1
+            preferredRendererType: Shape.CurveRenderer
+            visible: root.frostActive
+
+            ShapePath {
+                id: rimPath
+
+                readonly property real w: card.width - 2
+                readonly property real h: card.height - 2
+                readonly property real r: Math.max(0, card.radius - 1)
+                readonly property real t: card.rimWidth
+                readonly property real ir: Math.max(0, r - t)
+
+                strokeColor: "transparent"
+                fillRule: ShapePath.OddEvenFill
+                fillGradient: LinearGradient {
+                    // 233 degrees y-down points up-left: (cos, sin) = (-0.60, -0.80).
+                    x1: rimPath.w / 2 - 0.6 * rimPath.w / 2
+                    y1: rimPath.h / 2 - 0.8 * rimPath.h / 2
+                    x2: rimPath.w / 2 + 0.6 * rimPath.w / 2
+                    y2: rimPath.h / 2 + 0.8 * rimPath.h / 2
+
+                    GradientStop {
+                        position: 0
+                        color: root.rimLitColor
+                    }
+
+                    GradientStop {
+                        position: 1
+                        color: root.rimShadeColor
+                    }
+                }
+
+                PathRectangle {
+                    width: rimPath.w
+                    height: rimPath.h
+                    radius: rimPath.r
+                }
+
+                PathRectangle {
+                    x: rimPath.t
+                    y: rimPath.t
+                    width: rimPath.w - 2 * rimPath.t
+                    height: rimPath.h - 2 * rimPath.t
+                    radius: rimPath.ir
+                }
+            }
         }
 
         Row {

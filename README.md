@@ -78,6 +78,15 @@ feature is never discarded as a duplicate.
 The OSD stays visible for about 1.5 seconds. It can read
 DankMaterialShell-generated colors and typography. Both fallback palettes are
 defined, but with no valid DMS session input the standalone default is dark.
+
+When the DMS color cache is valid, DMS blur is enabled, and `dms blur check`
+answers `supported`, the card uses a frosted tier: `surface` at 90% alpha over
+a compositor background blur requested through Quickshell's
+`BackgroundEffect.blurRegion` (ext-background-effect-v1), plus a 1.5 px inner
+highlight rim lit from 233° (y-down). Otherwise it renders opaque
+`surface_container_high`. The 1 px border is `outline` at 35% in both tiers.
+On niri 26.04 the client request alone is honored; no layer rule is needed for
+the default `quickshell` namespace.
 All `zh*` locales use Chinese feature/state labels; other locales use English.
 IPC tokens remain stable English identifiers.
 
