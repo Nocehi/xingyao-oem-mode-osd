@@ -19,6 +19,20 @@ import Quickshell.Wayland
 PanelWindow {
     id: root
 
+    // Native glyph rasterisation while stationary; distance-field rendering while
+    // the item or any ancestor is scaled or rotated, so the card's 0.9 -> 1
+    // entrance does not make the labels shimmer. Bindings that call this
+    // re-evaluate when any ancestor's scale/rotation changes.
+    function textRenderType(item: Item): int {
+        return root.isTransformed(item) ? Text.QtRendering : Text.NativeRendering;
+    }
+
+    function isTransformed(item: Item): bool {
+        if (!item)
+            return false;
+        return item.scale !== 1 || item.rotation !== 0 || root.isTransformed(item.parent);
+    }
+
     // How long a shown OSD stays fully visible (ms).
     property int hideAfterMs: 1500
     property int animationDuration: 150
@@ -852,7 +866,10 @@ PanelWindow {
                 spacing: 1
 
                 Text {
+                    id: featureText
+
                     text: root.featureLabel
+                    renderType: root.textRenderType(featureText)
                     color: root.surfaceMutedColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(11 * root.themeFontScale)
@@ -861,7 +878,10 @@ PanelWindow {
                 }
 
                 Text {
+                    id: eventText
+
                     text: root.eventLabel
+                    renderType: root.textRenderType(eventText)
                     color: root.surfaceForegroundColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(17 * root.themeFontScale)
