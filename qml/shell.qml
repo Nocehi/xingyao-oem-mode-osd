@@ -317,10 +317,11 @@ PanelWindow {
         // Follow the card's entrance/exit animation: scale with it and slide
         // with it. Opacity is kept near 1 whenever the region is non-empty
         // (fast fade-in, late fade-out), so compositor blur (which cannot fade)
-        // stays covered by the tinted card. Positions are taken from the
-        // card's centre because the card is anchored, so card.y is already
-        // absolute.
-        readonly property real s: card.scale
+        // stays covered by the tinted card; below 30% opacity the region is
+        // held empty so no bare blur shows before the card does. Positions are
+        // taken from the card's centre because the card is anchored, so card.y
+        // is already absolute.
+        readonly property real s: card.opacity < 0.3 ? 0 : card.scale
         readonly property real w: card.width * s
         readonly property real h: card.height * s
 
