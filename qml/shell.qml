@@ -324,12 +324,13 @@ PanelWindow {
     Region {
         id: blurRegion
 
-        // Follow the card's entrance/exit animation: scale with it, slide with
-        // it, and collapse with its opacity so compositor blur (which cannot
-        // fade) is never visible outside the tinted card. Positions are taken
-        // from the card's centre because the card is anchored, so card.y is
-        // already absolute.
-        readonly property real s: card.scale * card.opacity
+        // Follow the card's entrance/exit animation: scale with it and slide
+        // with it. Opacity is kept near 1 whenever the region is non-empty
+        // (fast fade-in, late fade-out), so compositor blur (which cannot fade)
+        // stays covered by the tinted card. Positions are taken from the
+        // card's centre because the card is anchored, so card.y is already
+        // absolute.
+        readonly property real s: card.scale
         readonly property real w: card.width * s
         readonly property real h: card.height * s
 
@@ -890,10 +891,14 @@ PanelWindow {
             }
         }
 
+        // Key on the Behavior's own target: a shouldBeVisible binding here can
+        // still hold the previous direction when the animation starts.
         Behavior on opacity {
+            id: opacityBehavior
+
             NumberAnimation {
-                duration: root.animationDuration
-                easing.type: root.shouldBeVisible ? Easing.OutCubic : Easing.InCubic
+                duration: opacityBehavior.targetValue > 0.5 ? 60 : root.animationDuration
+                easing.type: opacityBehavior.targetValue > 0.5 ? Easing.OutCubic : Easing.InExpo
             }
         }
 
