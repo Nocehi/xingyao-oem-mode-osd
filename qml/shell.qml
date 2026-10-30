@@ -10,6 +10,7 @@ pragma ComponentBehavior: Bound
 
 import QtCore
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
@@ -17,6 +18,20 @@ import Quickshell.Wayland
 
 PanelWindow {
     id: root
+
+    // Native glyph rasterisation while stationary; distance-field rendering while
+    // the item or any ancestor is scaled or rotated, so the card's 0.9 -> 1
+    // entrance does not make the labels shimmer. Bindings that call this
+    // re-evaluate when any ancestor's scale/rotation changes.
+    function textRenderType(item: Item): int {
+        return root.isTransformed(item) ? Text.QtRendering : Text.NativeRendering;
+    }
+
+    function isTransformed(item: Item): bool {
+        if (!item)
+            return false;
+        return item.scale !== 1 || item.rotation !== 0 || root.isTransformed(item.parent);
+    }
 
     // How long a shown OSD stays fully visible (ms).
     property int hideAfterMs: 1500
@@ -31,33 +46,40 @@ PanelWindow {
     property var matugenData: ({})
     property var dmsSettings: ({})
     property bool isLightMode: false
+    // Fallbacks mirror the current matugen scheme from DMS's dms-colors.json.
     readonly property var fallbackDark: ({
-            "surface_container_high": "#261e18",
-            "surface_container_highest": "#302921",
-            "on_surface": "#eee0d5",
-            "on_surface_variant": "#d5c3b5",
-            "primary": "#fcb974",
-            "primary_container": "#693c00",
-            "on_primary_container": "#ffdcbd",
-            "secondary_container": "#59422c",
-            "on_secondary_container": "#fedcbe",
-            "tertiary_container": "#404b25",
-            "on_tertiary_container": "#dbe8b5",
-            "outline_variant": "#50453a"
+            "surface": "#11140e",
+            "surface_container_high": "#282b24",
+            "surface_container_highest": "#33362e",
+            "on_surface": "#e2e3d9",
+            "on_surface_variant": "#c4c8ba",
+            "primary": "#aed18d",
+            "primary_container": "#324e18",
+            "on_primary_container": "#caeea6",
+            "secondary_container": "#3f4a34",
+            "on_secondary_container": "#dae7c9",
+            "tertiary": "#f1bc96",
+            "tertiary_container": "#1e4e4c",
+            "on_tertiary_container": "#bbece9",
+            "outline": "#8e9286",
+            "outline_variant": "#44483e"
         })
     readonly property var fallbackLight: ({
-            "surface_container_high": "#faebe0",
-            "surface_container_highest": "#f4e6da",
-            "on_surface": "#211a14",
-            "on_surface_variant": "#50453a",
-            "primary": "#855317",
-            "primary_container": "#ffdcbd",
-            "on_primary_container": "#2c1600",
-            "secondary_container": "#fedcbe",
-            "on_secondary_container": "#291806",
-            "tertiary_container": "#dbe8b5",
-            "on_tertiary_container": "#161f01",
-            "outline_variant": "#d5c3b5"
+            "surface": "#f9faef",
+            "surface_container_high": "#e7e9de",
+            "surface_container_highest": "#e2e3d9",
+            "on_surface": "#1a1d16",
+            "on_surface_variant": "#44483e",
+            "primary": "#49672e",
+            "primary_container": "#caeea6",
+            "on_primary_container": "#0d2000",
+            "secondary_container": "#dae7c9",
+            "on_secondary_container": "#151e0c",
+            "tertiary": "#7e5537",
+            "tertiary_container": "#bbece9",
+            "on_tertiary_container": "#00201f",
+            "outline": "#74796d",
+            "outline_variant": "#c4c8ba"
         })
     readonly property var fallbackColors: root.isLightMode ? root.fallbackLight : root.fallbackDark
     readonly property var activeColors: {
@@ -65,34 +87,33 @@ PanelWindow {
         const selected = variants && variants[root.isLightMode ? "light" : "dark"];
         return selected || root.fallbackColors;
     }
-    readonly property color surfaceColor: root.colorOrFallback("surface_container_high")
+    // Frost tier needs both a valid DMS colour cache and compositor blur that
+    // DMS reports as supported and enabled; otherwise the card stays opaque.
+    property bool blurSupported: false
+    readonly property bool hasDmsColors: Boolean(root.matugenData && root.matugenData.colors)
+    readonly property bool frostActive: root.hasDmsColors && root.blurSupported && root.dmsSettings.blurEnabled === true
+    readonly property color surfaceColor: root.frostActive ? Qt.alpha(root.colorOrFallback("surface"), 0.9) : root.colorOrFallback("surface_container_high")
     readonly property color surfaceForegroundColor: root.colorOrFallback("on_surface")
     readonly property color surfaceMutedColor: root.colorOrFallback("on_surface_variant")
-    readonly property color outlineColor: root.colorOrFallback("outline_variant")
-    readonly property color accentColor: {
+    readonly property color outlineColor: Qt.alpha(root.colorOrFallback("outline"), 0.35)
+    // Directional rim lit from 233 degrees (y-down): upper-left edges at 22%,
+    // lower-right at 65% of that.
+    readonly property color rimLitColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.22)
+    readonly property color rimShadeColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.143)
+    // The glyph sits directly on the glass and carries the state in its colour.
+    readonly property color glyphColor: {
         switch (root.currentEvent) {
         case "performance":
-            return root.colorOrFallback("primary_container");
+        case "keyboard-backlight-high":
+            return root.colorOrFallback("primary");
         case "balanced":
         case "touchpad-on":
         case "microphone-on":
         case "airplane-off":
-            return root.colorOrFallback("tertiary_container");
+        case "keyboard-backlight-low":
+            return root.colorOrFallback("tertiary");
         default:
-            return root.colorOrFallback("secondary_container");
-        }
-    }
-    readonly property color accentForegroundColor: {
-        switch (root.currentEvent) {
-        case "performance":
-            return root.colorOrFallback("on_primary_container");
-        case "balanced":
-        case "touchpad-on":
-        case "microphone-on":
-        case "airplane-off":
-            return root.colorOrFallback("on_tertiary_container");
-        default:
-            return root.colorOrFallback("on_secondary_container");
+            return root.colorOrFallback("on_surface_variant");
         }
     }
     readonly property string localeName: Qt.locale().name.toLowerCase().split("_").join("-")
@@ -288,6 +309,41 @@ PanelWindow {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    BackgroundEffect.blurRegion: root.frostActive ? blurRegion : null
+
+    Region {
+        id: blurRegion
+
+        // Follow the card's entrance/exit animation: scale with it and slide
+        // with it. Opacity is kept near 1 whenever the region is non-empty
+        // (fast fade-in, late fade-out), so compositor blur (which cannot fade)
+        // stays covered by the tinted card; below 30% opacity the region is
+        // held empty so no bare blur shows before the card does. Positions are
+        // taken from the card's centre because the card is anchored, so card.y
+        // is already absolute.
+        readonly property real s: card.opacity < 0.3 ? 0 : card.scale
+        readonly property real w: card.width * s
+        readonly property real h: card.height * s
+
+        x: card.x + (card.width - w) / 2
+        y: card.y + (card.height - h) / 2
+        width: Math.max(0, w)
+        height: Math.max(0, h)
+        radius: Math.min(card.radius * s, h / 2)
+    }
+
+    // Same probe DMS uses for ext-background-effect-v1. A missing `dms`
+    // binary or any other answer keeps the opaque fallback.
+    Process {
+        id: blurProbe
+
+        command: ["dms", "blur", "check"]
+        running: true
+
+        stdout: StdioCollector {
+            onStreamFinished: root.blurSupported = text.trim() === "supported"
+        }
+    }
 
     IpcHandler {
         function show(mode: string): string {
@@ -410,18 +466,74 @@ PanelWindow {
         id: card
 
         anchors.centerIn: parent
+        readonly property real radius: Math.min(root.themeCornerRadius, height / 2)
+        readonly property real rimWidth: 1.5
+
         width: 264
         height: 66
         opacity: root.shouldBeVisible ? 1 : 0
-        scale: root.shouldBeVisible ? 1 : 0.94
-        y: root.shouldBeVisible ? 0 : 5
+        scale: root.shouldBeVisible ? 1 : 0.9
+        anchors.verticalCenterOffset: root.shouldBeVisible ? 0 : 5
 
         Rectangle {
             anchors.fill: parent
-            radius: Math.min(root.themeCornerRadius, height / 2)
+            radius: card.radius
             color: root.surfaceColor
             border.color: root.outlineColor
             border.width: 1
+        }
+
+        // Inner highlight ring just inside the 1 px border: an odd-even fill
+        // between two rounded rectangles, shaded along the light direction.
+        Shape {
+            anchors.fill: parent
+            anchors.margins: 1
+            preferredRendererType: Shape.CurveRenderer
+            visible: root.frostActive
+
+            ShapePath {
+                id: rimPath
+
+                readonly property real w: card.width - 2
+                readonly property real h: card.height - 2
+                readonly property real r: Math.max(0, card.radius - 1)
+                readonly property real t: card.rimWidth
+                readonly property real ir: Math.max(0, r - t)
+
+                strokeColor: "transparent"
+                fillRule: ShapePath.OddEvenFill
+                fillGradient: LinearGradient {
+                    // 233 degrees y-down points up-left: (cos, sin) = (-0.60, -0.80).
+                    x1: rimPath.w / 2 - 0.6 * rimPath.w / 2
+                    y1: rimPath.h / 2 - 0.8 * rimPath.h / 2
+                    x2: rimPath.w / 2 + 0.6 * rimPath.w / 2
+                    y2: rimPath.h / 2 + 0.8 * rimPath.h / 2
+
+                    GradientStop {
+                        position: 0
+                        color: root.rimLitColor
+                    }
+
+                    GradientStop {
+                        position: 1
+                        color: root.rimShadeColor
+                    }
+                }
+
+                PathRectangle {
+                    width: rimPath.w
+                    height: rimPath.h
+                    radius: rimPath.r
+                }
+
+                PathRectangle {
+                    x: rimPath.t
+                    y: rimPath.t
+                    width: rimPath.w - 2 * rimPath.t
+                    height: rimPath.h - 2 * rimPath.t
+                    radius: rimPath.ir
+                }
+            }
         }
 
         Row {
@@ -435,16 +547,17 @@ PanelWindow {
                 bottomMargin: 12
             }
 
-            Rectangle {
+            Item {
                 width: 42
                 height: 42
-                radius: 14
-                color: root.accentColor
 
                 Item {
                     anchors.centerIn: parent
                     width: 24
                     height: 22
+                    // Render glyphs at 28 px without touching their path coordinates.
+                    scale: 28 / 24
+                    transformOrigin: Item.Center
 
                     Row {
                         id: modeIcon
@@ -465,7 +578,7 @@ PanelWindow {
                                 width: 4
                                 height: root.barHeightFor(root.currentEvent, index)
                                 radius: 2
-                                color: root.accentForegroundColor
+                                color: root.glyphColor
 
                                 Behavior on height {
                                     NumberAnimation {
@@ -490,7 +603,7 @@ PanelWindow {
                             height: 14
                             radius: 3
                             color: "transparent"
-                            border.color: root.accentForegroundColor
+                            border.color: root.glyphColor
                             border.width: 2
                         }
 
@@ -506,7 +619,7 @@ PanelWindow {
                                     width: 2
                                     height: 3
                                     radius: 1
-                                    color: root.accentForegroundColor
+                                    color: root.glyphColor
                                 }
                             }
                         }
@@ -517,7 +630,7 @@ PanelWindow {
                             width: root.keyboardGlowWidthFor(root.currentEvent)
                             height: 2
                             radius: 1
-                            color: root.accentForegroundColor
+                            color: root.glyphColor
 
                             Behavior on width {
                                 NumberAnimation {
@@ -532,50 +645,51 @@ PanelWindow {
                         id: touchpadIcon
 
                         anchors.centerIn: parent
-                        width: 23
-                        height: 17
+                        width: 24
+                        height: 24
                         visible: root.currentFeature === "touchpad"
 
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 3
-                            color: "transparent"
-                            border.color: root.accentForegroundColor
-                            border.width: 2
-                        }
+                        Item {
+                            id: touchpadGlyph
 
-                        Rectangle {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: 11
-                            width: parent.width - 4
-                            height: 1
-                            color: root.accentForegroundColor
+                            anchors.fill: parent
+                            layer.enabled: root.currentEvent === "touchpad-off"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
+                            }
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 23
+                                height: 17
+                                radius: 3
+                                color: "transparent"
+                                border.color: root.glyphColor
+                                border.width: 2
+
+                                Rectangle {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    y: 11
+                                    width: parent.width - 4
+                                    height: 1
+                                    color: root.glyphColor
+                                }
+                            }
                         }
 
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
+                            anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             visible: root.currentEvent === "touchpad-off"
 
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
                             ShapePath {
-                                strokeColor: root.accentColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
-                                }
-                            }
-
-                            ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -589,59 +703,58 @@ PanelWindow {
                         }
                     }
 
-                    Shape {
+                    Item {
                         id: microphoneIcon
 
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        preferredRendererType: Shape.CurveRenderer
                         visible: root.currentFeature === "microphone"
 
-                        ShapePath {
-                            strokeColor: "transparent"
-                            fillColor: root.accentForegroundColor
-
-                            PathSvg {
-                                path: "M12 2.5 C13.66 2.5 15 3.84 15 5.5 L15 11 C15 12.66 13.66 14 12 14 C10.34 14 9 12.66 9 11 L9 5.5 C9 3.84 10.34 2.5 12 2.5 Z"
-                            }
-                        }
-
-                        ShapePath {
-                            strokeColor: root.accentForegroundColor
-                            strokeWidth: 2
-                            fillColor: "transparent"
-                            capStyle: ShapePath.RoundCap
-
-                            PathSvg {
-                                path: "M6.5 10.5 C6.5 13.8 9 16.5 12 16.5 C15 16.5 17.5 13.8 17.5 10.5 M12 16.5 L12 20.5 M9 20.5 L15 20.5"
-                            }
-                        }
-
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
-                            preferredRendererType: Shape.CurveRenderer
-                            visible: root.currentEvent === "microphone-muted"
+                            id: microphoneGlyph
 
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
+                            anchors.fill: parent
+                            preferredRendererType: Shape.CurveRenderer
+                            layer.enabled: root.currentEvent === "microphone-muted"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
+                            }
+
                             ShapePath {
-                                strokeColor: root.accentColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
+                                strokeColor: "transparent"
+                                fillColor: root.glyphColor
+
+                                PathSvg {
+                                    path: "M12 2.5 C13.66 2.5 15 3.84 15 5.5 L15 11 C15 12.66 13.66 14 12 14 C10.34 14 9 12.66 9 11 L9 5.5 C9 3.84 10.34 2.5 12 2.5 Z"
                                 }
                             }
 
                             ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
+                                strokeWidth: 2
+                                fillColor: "transparent"
+                                capStyle: ShapePath.RoundCap
+
+                                PathSvg {
+                                    path: "M6.5 10.5 C6.5 13.8 9 16.5 12 16.5 C15 16.5 17.5 13.8 17.5 10.5 M12 16.5 L12 20.5 M9 20.5 L15 20.5"
+                                }
+                            }
+                        }
+
+                        Shape {
+                            anchors.fill: parent
+                            preferredRendererType: Shape.CurveRenderer
+                            visible: root.currentEvent === "microphone-muted"
+
+                            ShapePath {
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -655,48 +768,47 @@ PanelWindow {
                         }
                     }
 
-                    Shape {
+                    Item {
                         id: airplaneIcon
 
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        preferredRendererType: Shape.CurveRenderer
                         visible: root.currentFeature === "airplane-mode"
 
-                        ShapePath {
-                            strokeColor: "transparent"
-                            fillColor: root.accentForegroundColor
+                        Shape {
+                            id: airplaneGlyph
 
-                            PathSvg {
-                                path: "M12 2 C12.9 2 13.5 2.9 13.5 4 L13.5 9.3 L21 13.6 L21 15.6 L13.5 13.4 L13.5 18 L16 19.8 L16 21.5 L12 20.4 L8 21.5 L8 19.8 L10.5 18 L10.5 13.4 L3 15.6 L3 13.6 L10.5 9.3 L10.5 4 C10.5 2.9 11.1 2 12 2 Z"
+                            anchors.fill: parent
+                            preferredRendererType: Shape.CurveRenderer
+                            layer.enabled: root.currentEvent === "airplane-off"
+                            layer.effect: MultiEffect {
+                                maskEnabled: true
+                                maskSource: slashCutMask
+                                maskInverted: true
+                                maskThresholdMin: 0.5
+                                maskSpreadAtMin: 0.0
+                                maskThresholdMax: 1.0
+                                maskSpreadAtMax: 0.0
+                            }
+
+                            ShapePath {
+                                strokeColor: "transparent"
+                                fillColor: root.glyphColor
+
+                                PathSvg {
+                                    path: "M12 2 C12.9 2 13.5 2.9 13.5 4 L13.5 9.3 L21 13.6 L21 15.6 L13.5 13.4 L13.5 18 L16 19.8 L16 21.5 L12 20.4 L8 21.5 L8 19.8 L10.5 18 L10.5 13.4 L3 15.6 L3 13.6 L10.5 9.3 L10.5 4 C10.5 2.9 11.1 2 12 2 Z"
+                                }
                             }
                         }
 
                         Shape {
-                            anchors.centerIn: parent
-                            width: 24
-                            height: 24
+                            anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             visible: root.currentEvent === "airplane-off"
 
-                            // A wider accent-coloured stroke cuts the glyph so the slash reads
-                            // as a separate mark rather than merging into the icon.
                             ShapePath {
-                                strokeColor: root.accentColor
-                                strokeWidth: 5
-                                fillColor: "transparent"
-                                capStyle: ShapePath.RoundCap
-                                startX: 4
-                                startY: 3
-                                PathLine {
-                                    x: 20
-                                    y: 21
-                                }
-                            }
-
-                            ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -709,11 +821,29 @@ PanelWindow {
                             }
                         }
                     }
-                }
 
-                Behavior on color {
-                    ColorAnimation {
-                        duration: root.animationDuration
+                    // Thick slash used as an inverted mask to cut the slashed glyphs.
+                    Shape {
+                        id: slashCutMask
+
+                        width: 24
+                        height: 24
+                        visible: false
+                        layer.enabled: true
+                        preferredRendererType: Shape.CurveRenderer
+
+                        ShapePath {
+                            strokeColor: "white"
+                            strokeWidth: 6
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            startX: 4
+                            startY: 3
+                            PathLine {
+                                x: 20
+                                y: 21
+                            }
+                        }
                     }
                 }
             }
@@ -723,7 +853,10 @@ PanelWindow {
                 spacing: 1
 
                 Text {
+                    id: featureText
+
                     text: root.featureLabel
+                    renderType: root.textRenderType(featureText)
                     color: root.surfaceMutedColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(11 * root.themeFontScale)
@@ -732,7 +865,10 @@ PanelWindow {
                 }
 
                 Text {
+                    id: eventText
+
                     text: root.eventLabel
+                    renderType: root.textRenderType(eventText)
                     color: root.surfaceForegroundColor
                     font.family: root.themeFontFamily
                     font.pixelSize: Math.round(17 * root.themeFontScale)
@@ -741,10 +877,14 @@ PanelWindow {
             }
         }
 
+        // Key on the Behavior's own target: a shouldBeVisible binding here can
+        // still hold the previous direction when the animation starts.
         Behavior on opacity {
+            id: opacityBehavior
+
             NumberAnimation {
-                duration: root.animationDuration
-                easing.type: root.shouldBeVisible ? Easing.OutCubic : Easing.InCubic
+                duration: opacityBehavior.targetValue > 0.5 ? 60 : root.animationDuration
+                easing.type: opacityBehavior.targetValue > 0.5 ? Easing.OutCubic : Easing.InExpo
             }
         }
 
@@ -755,7 +895,7 @@ PanelWindow {
             }
         }
 
-        Behavior on y {
+        Behavior on anchors.verticalCenterOffset {
             NumberAnimation {
                 duration: root.animationDuration
                 easing.type: Easing.OutCubic
