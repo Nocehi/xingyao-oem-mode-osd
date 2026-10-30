@@ -58,6 +58,7 @@ PanelWindow {
             "on_primary_container": "#caeea6",
             "secondary_container": "#3f4a34",
             "on_secondary_container": "#dae7c9",
+            "tertiary": "#f1bc96",
             "tertiary_container": "#1e4e4c",
             "on_tertiary_container": "#bbece9",
             "outline": "#8e9286",
@@ -74,6 +75,7 @@ PanelWindow {
             "on_primary_container": "#0d2000",
             "secondary_container": "#dae7c9",
             "on_secondary_container": "#151e0c",
+            "tertiary": "#7e5537",
             "tertiary_container": "#bbece9",
             "on_tertiary_container": "#00201f",
             "outline": "#74796d",
@@ -98,32 +100,20 @@ PanelWindow {
     // lower-right at 65% of that.
     readonly property color rimLitColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.22)
     readonly property color rimShadeColor: Qt.alpha(root.colorOrFallback("on_surface"), 0.143)
-    // Inside a frost card the accent tile is translucent so the blur reads through it; opaque tier keeps the M3 tonal tile.
-    readonly property color accentTileColor: root.frostActive ? Qt.alpha(root.accentColor, 0.6) : root.accentColor
-    readonly property color accentColor: {
+    // The glyph sits directly on the glass and carries the state in its colour.
+    readonly property color glyphColor: {
         switch (root.currentEvent) {
         case "performance":
-            return root.colorOrFallback("primary_container");
+        case "keyboard-backlight-high":
+            return root.colorOrFallback("primary");
         case "balanced":
         case "touchpad-on":
         case "microphone-on":
         case "airplane-off":
-            return root.colorOrFallback("tertiary_container");
+        case "keyboard-backlight-low":
+            return root.colorOrFallback("tertiary");
         default:
-            return root.colorOrFallback("secondary_container");
-        }
-    }
-    readonly property color accentForegroundColor: {
-        switch (root.currentEvent) {
-        case "performance":
-            return root.colorOrFallback("on_primary_container");
-        case "balanced":
-        case "touchpad-on":
-        case "microphone-on":
-        case "airplane-off":
-            return root.colorOrFallback("on_tertiary_container");
-        default:
-            return root.colorOrFallback("on_secondary_container");
+            return root.colorOrFallback("on_surface_variant");
         }
     }
     readonly property string localeName: Qt.locale().name.toLowerCase().split("_").join("-")
@@ -556,16 +546,17 @@ PanelWindow {
                 bottomMargin: 12
             }
 
-            Rectangle {
+            Item {
                 width: 42
                 height: 42
-                radius: Math.max(8, card.radius - 12)
-                color: root.accentTileColor
 
                 Item {
                     anchors.centerIn: parent
                     width: 24
                     height: 22
+                    // Render glyphs at 28 px without touching their path coordinates.
+                    scale: 28 / 24
+                    transformOrigin: Item.Center
 
                     Row {
                         id: modeIcon
@@ -586,7 +577,7 @@ PanelWindow {
                                 width: 4
                                 height: root.barHeightFor(root.currentEvent, index)
                                 radius: 2
-                                color: root.accentForegroundColor
+                                color: root.glyphColor
 
                                 Behavior on height {
                                     NumberAnimation {
@@ -611,7 +602,7 @@ PanelWindow {
                             height: 14
                             radius: 3
                             color: "transparent"
-                            border.color: root.accentForegroundColor
+                            border.color: root.glyphColor
                             border.width: 2
                         }
 
@@ -627,7 +618,7 @@ PanelWindow {
                                     width: 2
                                     height: 3
                                     radius: 1
-                                    color: root.accentForegroundColor
+                                    color: root.glyphColor
                                 }
                             }
                         }
@@ -638,7 +629,7 @@ PanelWindow {
                             width: root.keyboardGlowWidthFor(root.currentEvent)
                             height: 2
                             radius: 1
-                            color: root.accentForegroundColor
+                            color: root.glyphColor
 
                             Behavior on width {
                                 NumberAnimation {
@@ -678,7 +669,7 @@ PanelWindow {
                                 height: 17
                                 radius: 3
                                 color: "transparent"
-                                border.color: root.accentForegroundColor
+                                border.color: root.glyphColor
                                 border.width: 2
 
                                 Rectangle {
@@ -686,7 +677,7 @@ PanelWindow {
                                     y: 11
                                     width: parent.width - 4
                                     height: 1
-                                    color: root.accentForegroundColor
+                                    color: root.glyphColor
                                 }
                             }
                         }
@@ -697,7 +688,7 @@ PanelWindow {
                             visible: root.currentEvent === "touchpad-off"
 
                             ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -737,7 +728,7 @@ PanelWindow {
 
                             ShapePath {
                                 strokeColor: "transparent"
-                                fillColor: root.accentForegroundColor
+                                fillColor: root.glyphColor
 
                                 PathSvg {
                                     path: "M12 2.5 C13.66 2.5 15 3.84 15 5.5 L15 11 C15 12.66 13.66 14 12 14 C10.34 14 9 12.66 9 11 L9 5.5 C9 3.84 10.34 2.5 12 2.5 Z"
@@ -745,7 +736,7 @@ PanelWindow {
                             }
 
                             ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -762,7 +753,7 @@ PanelWindow {
                             visible: root.currentEvent === "microphone-muted"
 
                             ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -802,7 +793,7 @@ PanelWindow {
 
                             ShapePath {
                                 strokeColor: "transparent"
-                                fillColor: root.accentForegroundColor
+                                fillColor: root.glyphColor
 
                                 PathSvg {
                                     path: "M12 2 C12.9 2 13.5 2.9 13.5 4 L13.5 9.3 L21 13.6 L21 15.6 L13.5 13.4 L13.5 18 L16 19.8 L16 21.5 L12 20.4 L8 21.5 L8 19.8 L10.5 18 L10.5 13.4 L3 15.6 L3 13.6 L10.5 9.3 L10.5 4 C10.5 2.9 11.1 2 12 2 Z"
@@ -816,7 +807,7 @@ PanelWindow {
                             visible: root.currentEvent === "airplane-off"
 
                             ShapePath {
-                                strokeColor: root.accentForegroundColor
+                                strokeColor: root.glyphColor
                                 strokeWidth: 2
                                 fillColor: "transparent"
                                 capStyle: ShapePath.RoundCap
@@ -852,12 +843,6 @@ PanelWindow {
                                 y: 21
                             }
                         }
-                    }
-                }
-
-                Behavior on color {
-                    ColorAnimation {
-                        duration: root.animationDuration
                     }
                 }
             }
